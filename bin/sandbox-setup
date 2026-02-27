@@ -17,26 +17,33 @@ done
 
 # ── Step 1: Prerequisites ──────────────────────────────────────────
 info "Checking prerequisites..."
-require_command orb
+if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+  require_command orb
+fi
 require_command gh
 require_command ssh-keygen
 gh auth status &>/dev/null 2>&1 || warn "gh not authenticated — deploy key automation won't work until you run 'gh auth login'"
-ok "Prerequisites OK"
+ok "Prerequisites OK (platform: ${SANDBOX_PLATFORM})"
 
 # ── Step 2: OrbStack machine ───────────────────────────────────────
 echo ""
-info "Step 1: OrbStack machine '${SANDBOX_MACHINE}'..."
-if orb list 2>/dev/null | grep -q "${SANDBOX_MACHINE}"; then
-  ok "Machine already exists, skipping"
+if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+  info "Step 1: OrbStack machine '${SANDBOX_MACHINE}'..."
+  if orb list 2>/dev/null | grep -q "${SANDBOX_MACHINE}"; then
+    ok "Machine already exists, skipping"
+  else
+    orb create ubuntu:noble "${SANDBOX_MACHINE}"
+    ok "Machine created"
+  fi
 else
-  orb create ubuntu:noble "${SANDBOX_MACHINE}"
-  ok "Machine created"
+  info "Step 1: Native Linux host detected, skipping VM creation"
+  ok "Running directly on Linux"
 fi
 
 # ── Step 3: Install Incus ──────────────────────────────────────────
 echo ""
 info "Step 2: Installing Incus..."
-orb run -m "${SANDBOX_MACHINE}" bash << 'INCUS_SETUP'
+vm_run bash << 'INCUS_SETUP'
 set -e
 
 if command -v incus &>/dev/null; then
@@ -89,11 +96,8 @@ ok "Incus ready"
 # ── Step 3b: Container network isolation ──────────────────────────
 echo ""
 info "Step 2b: Enforcing container network isolation..."
-orb_exec "
-  # L2 port isolation — prevents container-to-container traffic on the bridge
+vm_exec "
   incus profile device set default eth0 security.port_isolation=true
-
-  # Anti-spoofing — prevents IP/MAC address spoofing between containers
   incus profile device set default eth0 security.ipv4_filtering=true
   incus profile device set default eth0 security.ipv6_filtering=true
 "
@@ -102,34 +106,34 @@ ok "Container isolation active (port_isolation + ipv4/ipv6 filtering)"
 # ── Step 4: Egress filtering ───────────────────────────────────────
 echo ""
 info "Step 3: Applying egress filtering rules..."
-orb run -m "${SANDBOX_MACHINE}" bash << 'EGRESS'
+_OIFACE="${OUTBOUND_IFACE}"
+vm_run bash << EGRESS
 set -e
 
-# Check if rules already exist (idempotent)
 if iptables -L FORWARD -n 2>/dev/null | grep -q "incusbr0.*DROP"; then
   echo "Egress rules already applied"
   exit 0
 fi
 
 # Default deny outbound from containers
-iptables -I FORWARD -i incusbr0 -o eth0 -j DROP
+iptables -I FORWARD -i incusbr0 -o ${_OIFACE} -j DROP
 
 # Allow DNS (TCP + UDP)
-iptables -I FORWARD -i incusbr0 -o eth0 -p udp --dport 53 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o eth0 -p tcp --dport 53 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o ${_OIFACE} -p udp --dport 53 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o ${_OIFACE} -p tcp --dport 53 -j ACCEPT
 
 # Allow HTTP
-iptables -I FORWARD -i incusbr0 -o eth0 -p tcp --dport 80 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o ${_OIFACE} -p tcp --dport 80 -j ACCEPT
 
 # Allow HTTPS (TCP + UDP for HTTP/3 QUIC)
-iptables -I FORWARD -i incusbr0 -o eth0 -p tcp --dport 443 -j ACCEPT
-iptables -I FORWARD -i incusbr0 -o eth0 -p udp --dport 443 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o ${_OIFACE} -p tcp --dport 443 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o ${_OIFACE} -p udp --dport 443 -j ACCEPT
 
 # Allow SSH (git over SSH)
-iptables -I FORWARD -i incusbr0 -o eth0 -p tcp --dport 22 -j ACCEPT
+iptables -I FORWARD -i incusbr0 -o ${_OIFACE} -p tcp --dport 22 -j ACCEPT
 
 # Allow established/related return traffic
-iptables -I FORWARD -i eth0 -o incusbr0 -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -I FORWARD -i ${_OIFACE} -o incusbr0 -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 echo "Egress rules applied"
 EGRESS
@@ -140,7 +144,7 @@ echo ""
 info "Step 3b: Installing domain filtering proxy (Squid)..."
 ensure_squid_installed
 deploy_squid_config
-orb_exec "systemctl enable squid 2>/dev/null && systemctl start squid 2>/dev/null || systemctl restart squid 2>/dev/null || true"
+vm_exec "systemctl enable squid 2>/dev/null && systemctl start squid 2>/dev/null || systemctl restart squid 2>/dev/null || true"
 ok "Squid proxy ready (idle — no traffic until --restrict-domains is used)"
 
 # ── Step 5: Build golden images ────────────────────────────────────
@@ -158,42 +162,42 @@ build_golden() {
 
   # Check if already built (unless --rebuild)
   if [[ "$REBUILD_STACK" != "$stack" && "$REBUILD_STACK" != "all" ]]; then
-    if orb_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" 2>/dev/null; then
+    if vm_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" 2>/dev/null; then
       ok "${golden_name}/ready already exists, skipping"
       return 0
     fi
   fi
 
   # Clean up existing if rebuilding
-  orb_exec "incus delete ${golden_name} --force 2>/dev/null || true"
+  vm_exec "incus delete ${golden_name} --force 2>/dev/null || true"
 
   if [[ "$stack" == "base" ]]; then
     # Base image: launch fresh Ubuntu
     info "Building ${golden_name} (this takes several minutes)..."
-    orb_exec "
+    vm_exec "
       incus launch images:ubuntu/24.04 ${golden_name} \
         -c security.nesting=true \
         -c security.syscalls.intercept.mknod=true \
         -c security.syscalls.intercept.setxattr=true
     "
-    orb_exec "sleep 5 && incus exec ${golden_name} -- cloud-init status --wait 2>/dev/null || true"
+    vm_exec "sleep 5 && incus exec ${golden_name} -- cloud-init status --wait 2>/dev/null || true"
   else
     # Variant: clone from base
     info "Building ${golden_name} from golden-base..."
-    orb_exec "incus copy golden-base/ready ${golden_name}"
-    orb_exec "incus start ${golden_name}"
-    orb_exec "sleep 3"
+    vm_exec "incus copy golden-base/ready ${golden_name}"
+    vm_exec "incus start ${golden_name}"
+    vm_exec "sleep 3"
   fi
 
   # Run the stack script inside the container
   info "Running ${stack}.sh inside ${golden_name}..."
-  orb run -m "${SANDBOX_MACHINE}" bash -c "
+  vm_run bash -c "
     cat /dev/stdin | incus exec ${golden_name} -- bash
   " < "$stack_script"
 
   # Stop and snapshot
-  orb_exec "incus stop ${golden_name}"
-  orb_exec "incus snapshot create ${golden_name} ready"
+  vm_exec "incus stop ${golden_name}"
+  vm_exec "incus snapshot create ${golden_name} ready"
   ok "${golden_name}/ready created"
 }
 

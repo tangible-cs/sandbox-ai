@@ -15,6 +15,28 @@ SANDBOX_USER_DOMAINS="${HOME}/.sandbox/allowed-domains.txt"
 SQUID_CONF_DIR="/etc/squid/sandbox"
 SQUID_PORT=3129
 
+# ── Platform detection ────────────────────────────────────────────
+detect_platform() {
+  case "$(uname -s)" in
+    Darwin) SANDBOX_PLATFORM="macos" ;;
+    Linux)  SANDBOX_PLATFORM="linux" ;;
+    *)      die "Unsupported platform: $(uname -s)" ;;
+  esac
+}
+
+detect_outbound_iface() {
+  if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+    # Inside OrbStack VM, the outbound interface is always eth0
+    echo "eth0"
+  else
+    # Detect from default route on Linux host
+    ip -4 route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}'
+  fi
+}
+
+detect_platform
+OUTBOUND_IFACE=$(detect_outbound_iface)
+
 # ── Colour helpers (no-op if not a terminal) ────────────────────────
 if [[ -t 1 ]]; then
   RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
@@ -34,15 +56,27 @@ require_command() {
   command -v "$1" &>/dev/null || die "'$1' is required but not found. Install it first."
 }
 
-require_orb() {
-  require_command orb
-  orb list &>/dev/null || die "OrbStack is not running. Start it first."
+require_vm() {
+  if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+    require_command orb
+    orb list &>/dev/null || die "OrbStack is not running. Start it first."
+  else
+    require_command incus
+    incus list &>/dev/null 2>&1 || die "Incus is not running or not accessible. Check 'incus-admin' group membership."
+  fi
 }
 
-require_machine() {
-  require_orb
-  orb list 2>/dev/null | grep -q "${SANDBOX_MACHINE}" \
-    || die "Sandbox machine not found. Run 'sandbox-setup' first."
+require_sandbox() {
+  if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+    require_vm
+    orb list 2>/dev/null | grep -q "${SANDBOX_MACHINE}" \
+      || die "Sandbox machine not found. Run 'sandbox-setup' first."
+  else
+    require_vm
+    # On Linux, just verify Incus is initialized (has a default profile)
+    incus profile show default &>/dev/null 2>&1 \
+      || die "Incus not initialized. Run 'sandbox-setup' first."
+  fi
 }
 
 require_gh() {
@@ -53,15 +87,29 @@ require_gh() {
 require_golden() {
   local stack="${1:-base}"
   local golden_name="golden-${stack}"
-  orb_exec "incus info ${golden_name} &>/dev/null" \
+  vm_exec "incus info ${golden_name} &>/dev/null" \
     || die "Golden image '${golden_name}' not found. Run 'sandbox-setup' first."
-  orb_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" \
+  vm_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" \
     || die "Golden image '${golden_name}' has no 'ready' snapshot. Run 'sandbox-setup' first."
 }
 
-# ── OrbStack execution ─────────────────────────────────────────────
-orb_exec() {
-  orb run -m "${SANDBOX_MACHINE}" bash -c "$1"
+# ── VM execution abstraction ──────────────────────────────────────
+# vm_run: Execute a command in the sandbox environment.
+#   macOS: runs via 'orb run -m sandbox <args>'
+#   Linux: runs <args> directly on the host
+vm_run() {
+  if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+    orb run -m "${SANDBOX_MACHINE}" "$@"
+  else
+    "$@"
+  fi
+}
+
+# vm_exec: Run a bash -c command string in the sandbox environment.
+#   macOS: orb run -m sandbox bash -c "cmd"
+#   Linux: bash -c "cmd"
+vm_exec() {
+  vm_run bash -c "$1"
 }
 
 # ── Container naming ───────────────────────────────────────────────
@@ -77,7 +125,7 @@ alt_port()  { echo $(( 9000 + $1 )); }
 
 # Returns list of currently used slots by querying ssh-proxy listen ports
 used_slots() {
-  orb_exec '
+  vm_exec '
     for c in $(incus list -f csv -c n 2>/dev/null | grep "^agent-"); do
       port=$(incus config device get "$c" ssh-proxy listen 2>/dev/null | grep -o "[0-9]*$" || true)
       if [ -n "$port" ]; then
@@ -168,16 +216,20 @@ deploy_key_cleanup() {
 # ── SSH agent management (per-container, inside OrbStack VM) ───────
 ssh_agent_setup() {
   local container="$1"
-  local key_path="$2"  # macOS path to private key
+  local key_path="$2"  # Host path to private key
   local socket_path="/tmp/sandbox-agent-${container}.sock"
 
-  # Copy key into OrbStack VM temporarily
+  # Copy key into sandbox environment temporarily
   local vm_key="/tmp/sandbox-key-${container}"
-  orb run -m "${SANDBOX_MACHINE}" tee "$vm_key" < "$key_path" >/dev/null
-  orb_exec "chmod 600 ${vm_key}"
+  if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+    orb run -m "${SANDBOX_MACHINE}" tee "$vm_key" < "$key_path" >/dev/null
+  else
+    cp "$key_path" "$vm_key"
+  fi
+  vm_exec "chmod 600 ${vm_key}"
 
   # Start dedicated ssh-agent and add key
-  orb_exec "
+  vm_exec "
     # Kill any existing agent for this container
     if [ -f /tmp/sandbox-agent-${container}.pid ]; then
       kill \$(cat /tmp/sandbox-agent-${container}.pid) 2>/dev/null || true
@@ -189,19 +241,19 @@ ssh_agent_setup() {
     echo \$SSH_AGENT_PID > /tmp/sandbox-agent-${container}.pid
     SSH_AUTH_SOCK=${socket_path} ssh-add ${vm_key}
 
-    # Remove the temporary key from VM disk
+    # Remove the temporary key from disk
     rm -f ${vm_key}
   "
 
   # Mount the socket into the container
-  orb_exec "
+  vm_exec "
     incus config device add ${container} ssh-agent disk \
       source=${socket_path} \
       path=/run/ssh-agent.sock
   "
 
   # Set SSH_AUTH_SOCK in container's bashrc
-  orb_exec "
+  vm_exec "
     incus exec ${container} -- bash -c '
       grep -q SSH_AUTH_SOCK /root/.bashrc 2>/dev/null || \
         echo \"export SSH_AUTH_SOCK=/run/ssh-agent.sock\" >> /root/.bashrc
@@ -212,7 +264,7 @@ ssh_agent_setup() {
 ssh_agent_cleanup() {
   local container="$1"
 
-  orb_exec "
+  vm_exec "
     if [ -f /tmp/sandbox-agent-${container}.pid ]; then
       kill \$(cat /tmp/sandbox-agent-${container}.pid) 2>/dev/null || true
       rm -f /tmp/sandbox-agent-${container}.pid
@@ -254,7 +306,7 @@ inject_env() {
         export_block+="${line}\n"
       fi
     done
-    orb_exec "
+    vm_exec "
       incus exec ${container} -- bash -c 'echo -e \"${export_block}\" >> /root/.bashrc'
     "
   fi
@@ -264,12 +316,12 @@ inject_env() {
 # Store metadata in Incus config user.* keys for later retrieval
 set_metadata() {
   local container="$1" key="$2" value="$3"
-  orb_exec "incus config set ${container} user.sandbox.${key}='${value}'"
+  vm_exec "incus config set ${container} user.sandbox.${key}='${value}'"
 }
 
 get_metadata() {
   local container="$1" key="$2"
-  orb_exec "incus config get ${container} user.sandbox.${key} 2>/dev/null" || true
+  vm_exec "incus config get ${container} user.sandbox.${key} 2>/dev/null" || true
 }
 
 # ── Domain-based egress filtering (Squid proxy) ──────────────────
@@ -297,7 +349,7 @@ parse_domains_file() {
 
 # Install squid-openssl in the VM if not present
 ensure_squid_installed() {
-  orb run -m "${SANDBOX_MACHINE}" bash << 'SQUID_INSTALL'
+  vm_run bash << 'SQUID_INSTALL'
 set -e
 if command -v squid &>/dev/null; then
   echo "Squid already installed"
@@ -313,7 +365,7 @@ SQUID_INSTALL
 
 # Write base squid.conf with peek/splice SNI filtering config
 deploy_squid_config() {
-  orb run -m "${SANDBOX_MACHINE}" bash << 'SQUID_CONF'
+  vm_run bash << 'SQUID_CONF'
 set -e
 
 CONF_DIR="/etc/squid/sandbox"
@@ -384,16 +436,13 @@ setup_container_domain_filter() {
   local parsed_domains
   parsed_domains=$(parse_domains_file "$domains_file")
 
-  # Convert our format (.example.com for wildcard) to Squid dstdomain format
-  # Squid dstdomain: .example.com matches example.com and *.example.com (same as ours)
-  orb run -m "${SANDBOX_MACHINE}" bash -c "
+  vm_run bash -c "
     cat > /etc/squid/sandbox/containers/${container}.domains << 'DOMAINS'
 ${parsed_domains}
 DOMAINS
   "
 
-  # Generate per-container ACL config
-  orb run -m "${SANDBOX_MACHINE}" bash -c "
+  vm_run bash -c "
     cat > /etc/squid/sandbox/containers/${container}.conf << ACL_EOF
 acl ${container}_src src ${container_ip}/32
 acl ${container}_domains dstdomain \"/etc/squid/sandbox/containers/${container}.domains\"
@@ -402,14 +451,13 @@ http_access deny ${container}_src
 ACL_EOF
   "
 
-  # Reload Squid to pick up new ACL
-  orb_exec "squid -k reconfigure 2>/dev/null || systemctl reload squid 2>/dev/null || true"
+  vm_exec "squid -k reconfigure 2>/dev/null || systemctl reload squid 2>/dev/null || true"
 }
 
 # Remove per-container Squid ACL and domains file, then reload
 cleanup_container_domain_filter() {
   local container="$1"
-  orb_exec "
+  vm_exec "
     rm -f /etc/squid/sandbox/containers/${container}.conf \
           /etc/squid/sandbox/containers/${container}.domains
     squid -k reconfigure 2>/dev/null || systemctl reload squid 2>/dev/null || true
@@ -419,11 +467,9 @@ cleanup_container_domain_filter() {
 # Add iptables NAT PREROUTING rules to redirect this container's 443/80 traffic to Squid
 redirect_container_to_squid() {
   local container_ip="$1"
-  orb_exec "
-    # Redirect HTTPS (443) to Squid
+  vm_exec "
     iptables -t nat -A PREROUTING -s ${container_ip}/32 -p tcp --dport 443 \
       -j REDIRECT --to-port ${SQUID_PORT}
-    # Redirect HTTP (80) to Squid
     iptables -t nat -A PREROUTING -s ${container_ip}/32 -p tcp --dport 80 \
       -j REDIRECT --to-port ${SQUID_PORT}
   "
@@ -432,7 +478,7 @@ redirect_container_to_squid() {
 # Remove iptables NAT PREROUTING rules for this container
 remove_container_squid_redirect() {
   local container_ip="$1"
-  orb_exec "
+  vm_exec "
     iptables -t nat -S PREROUTING 2>/dev/null | grep '${container_ip}' | while read -r rule; do
       iptables -t nat \$(echo \"\$rule\" | sed 's/^-A/-D/')
     done

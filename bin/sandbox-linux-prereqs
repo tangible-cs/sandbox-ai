@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# sandbox-linux-prereqs — Install Linux prerequisites for sandbox-setup
+# Usage: sudo sandbox-linux-prereqs
+#
+# Installs packages and configures group membership so that sandbox-setup
+# can run without manual preparation.  Idempotent — safe to re-run.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+
+# ── Platform guard ────────────────────────────────────────────────
+if [[ "$SANDBOX_PLATFORM" != "linux" ]]; then
+  die "This script is for Linux only (detected: ${SANDBOX_PLATFORM})"
+fi
+
+# ── Root guard ────────────────────────────────────────────────────
+if [[ $EUID -ne 0 ]]; then
+  die "This script must be run as root. Use: sudo $0"
+fi
+
+# Determine the real (non-root) user who invoked sudo
+TARGET_USER="${SUDO_USER:-$USER}"
+if [[ "$TARGET_USER" == "root" ]]; then
+  warn "Running as root without SUDO_USER set — group membership changes will target 'root'"
+fi
+
+GROUP_CHANGED=false
+PACKAGES_INSTALLED=()
+
+# ── Step 1: apt-get update ────────────────────────────────────────
+echo ""
+info "Step 1: Updating package lists..."
+apt-get update -qq
+ok "Package lists updated"
+
+# ── Step 2: Install system packages ───────────────────────────────
+echo ""
+info "Step 2: Installing system packages..."
+
+install_if_missing() {
+  local cmd="$1"
+  local pkg="$2"
+  if command -v "$cmd" &>/dev/null; then
+    ok "${cmd} already installed"
+  else
+    info "Installing ${pkg}..."
+    apt-get install -y -qq "$pkg"
+    PACKAGES_INSTALLED+=("$pkg")
+    ok "${cmd} installed"
+  fi
+}
+
+install_if_missing iptables iptables
+install_if_missing curl     curl
+install_if_missing gpg      gnupg
+install_if_missing git      git
+
+# ── Step 3: Install GitHub CLI (gh) ───────────────────────────────
+echo ""
+info "Step 3: GitHub CLI (gh)..."
+
+if command -v gh &>/dev/null; then
+  ok "gh already installed ($(gh --version | head -1))"
+else
+  info "Adding GitHub CLI apt repository..."
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list
+  apt-get update -qq
+  apt-get install -y -qq gh
+  PACKAGES_INSTALLED+=("gh")
+  ok "gh installed ($(gh --version | head -1))"
+fi
+
+# ── Step 4: incus-admin group ─────────────────────────────────────
+echo ""
+info "Step 4: incus-admin group membership..."
+
+if getent group incus-admin &>/dev/null; then
+  ok "incus-admin group exists"
+else
+  info "Creating incus-admin group (Incus will use it after sandbox-setup installs it)..."
+  groupadd incus-admin
+  ok "incus-admin group created"
+fi
+
+if id -nG "$TARGET_USER" 2>/dev/null | grep -qw incus-admin; then
+  ok "${TARGET_USER} is already in incus-admin"
+else
+  info "Adding ${TARGET_USER} to incus-admin group..."
+  usermod -aG incus-admin "$TARGET_USER"
+  GROUP_CHANGED=true
+  ok "${TARGET_USER} added to incus-admin"
+fi
+
+# ── Summary ───────────────────────────────────────────────────────
+echo ""
+ok "=== Linux prerequisites complete ==="
+echo ""
+
+if [[ ${#PACKAGES_INSTALLED[@]} -gt 0 ]]; then
+  info "Packages installed: ${PACKAGES_INSTALLED[*]}"
+else
+  info "No new packages were needed"
+fi
+
+if [[ "$GROUP_CHANGED" == true ]]; then
+  echo ""
+  warn "Group membership changed — you must log out and back in (or run 'newgrp incus-admin') before running sandbox-setup."
+fi
+
+echo ""
+echo "Next steps:"
+echo "  1. Log out and back in (if group membership changed)"
+echo "  2. Run 'sandbox-setup' to install Incus, Squid, and build golden images"

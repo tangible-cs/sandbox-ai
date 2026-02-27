@@ -49,10 +49,10 @@ done
 # ── Resolve --from ──────────────────────────────────────────────────
 if [[ -n "$FROM" ]]; then
   FROM_CONTAINER=$(container_name "$FROM")
-  require_machine
+  require_sandbox
 
   if [[ -z "$REPO" ]]; then
-    REPO=$(orb_exec "incus exec ${FROM_CONTAINER} -- git -C ${WORKSPACE_DIR} remote get-url origin 2>/dev/null" || true)
+    REPO=$(vm_exec "incus exec ${FROM_CONTAINER} -- git -C ${WORKSPACE_DIR} remote get-url origin 2>/dev/null" || true)
     [[ -n "$REPO" ]] || die "Could not determine repo URL from container '${FROM_CONTAINER}'"
     info "Inherited repo: ${REPO}"
   fi
@@ -91,13 +91,13 @@ if [[ -n "$FROM" ]]; then
 fi
 
 # ── Validate ────────────────────────────────────────────────────────
-require_machine
+require_sandbox
 require_golden "$STACK"
 
 CONTAINER=$(container_name "$NAME")
 
 # Check container doesn't already exist
-if orb_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null; then
+if vm_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null; then
   die "Container '${CONTAINER}' already exists. Use 'sandbox-stop ${NAME} --rm' to remove it first."
 fi
 
@@ -127,20 +127,20 @@ fi
 # ── Create container ────────────────────────────────────────────────
 info "Creating '${CONTAINER}' from golden-${STACK}/ready (slot ${SLOT})..."
 
-orb_exec "
+vm_exec "
   incus copy golden-${STACK}/ready ${CONTAINER}
 "
 
 # Resource limits (only if explicitly set)
 if [[ -n "$CPU" ]]; then
-  orb_exec "incus config set ${CONTAINER} limits.cpu=${CPU}"
+  vm_exec "incus config set ${CONTAINER} limits.cpu=${CPU}"
 fi
 if [[ -n "$MEMORY" ]]; then
-  orb_exec "incus config set ${CONTAINER} limits.memory=${MEMORY}"
+  vm_exec "incus config set ${CONTAINER} limits.memory=${MEMORY}"
 fi
 
 # Proxy devices for port forwarding
-orb_exec "
+vm_exec "
   incus config device add ${CONTAINER} ssh-proxy proxy \
     listen=tcp:0.0.0.0:${SSH_P} connect=tcp:127.0.0.1:22
 
@@ -152,8 +152,8 @@ orb_exec "
 "
 
 # Start
-orb_exec "incus start ${CONTAINER}"
-orb_exec "sleep 3"
+vm_exec "incus start ${CONTAINER}"
+vm_exec "sleep 3"
 
 # ── SSH agent ───────────────────────────────────────────────────────
 if [[ -n "$KEY_PATH" ]]; then
@@ -170,7 +170,7 @@ if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
   RESOLVED_DOMAINS_FILE=$(resolve_domains_file "$DOMAINS_FILE")
   RESOLVED_DOMAINS_NAME=$(basename "$RESOLVED_DOMAINS_FILE")
 
-  CONTAINER_IP=$(orb_exec "
+  CONTAINER_IP=$(vm_exec "
     incus list ${CONTAINER} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
   ")
   [[ -n "$CONTAINER_IP" ]] || die "Could not determine container IP for domain filtering"
@@ -179,7 +179,7 @@ if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
   redirect_container_to_squid "$CONTAINER_IP"
 
   # Block UDP 443 for this container (prevent QUIC bypass)
-  orb_exec "iptables -I FORWARD -s ${CONTAINER_IP} -o eth0 -p udp --dport 443 -j DROP"
+  vm_exec "iptables -I FORWARD -s ${CONTAINER_IP} -o ${OUTBOUND_IFACE} -p udp --dport 443 -j DROP"
 
   ok "Domain filtering active (${RESOLVED_DOMAINS_NAME})"
 fi
@@ -200,7 +200,7 @@ if [[ -n "$REPO" ]]; then
   [[ -n "$BRANCH" ]] && CLONE_CMD+=" --branch ${BRANCH}"
   CLONE_CMD+=" '${REPO}' ${WORKSPACE_DIR}"
 
-  orb_exec "incus exec ${CONTAINER} -- bash -c '${CLONE_CMD}'" \
+  vm_exec "incus exec ${CONTAINER} -- bash -c '${CLONE_CMD}'" \
     || die "Git clone failed. Check SSH key and repo access."
   ok "Repository cloned"
 fi

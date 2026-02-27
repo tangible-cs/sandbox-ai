@@ -3,9 +3,9 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
-require_machine
+require_sandbox
 
-orb run -m "${SANDBOX_MACHINE}" bash << 'INNERLIST'
+vm_run bash << 'INNERLIST'
 #!/usr/bin/env bash
 
 CONTAINERS=$(incus list -f csv -c n 2>/dev/null | grep "^agent-" || true)

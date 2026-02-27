@@ -1,68 +1,22 @@
 # Sandbox Claude Code
 
-Run Claude Code agents in fully isolated Incus containers inside an OrbStack VM on macOS. Enable YOLO mode with confidence -- your Mac filesystem, credentials, and network stay untouched. Each container gets its own filesystem, Docker daemon, workspace, dedicated SSH deploy key, bidirectional port forwarding, and egress filtering.
+Run Claude Code agents in fully isolated Incus containers on **macOS** (via OrbStack VM) or **native Linux**. Enable YOLO mode with confidence -- your host filesystem, credentials, and network stay untouched. Each container gets its own filesystem, Docker daemon, workspace, dedicated SSH deploy key, bidirectional port forwarding, and egress filtering.
 
-## Table of Contents
+## Key Features
 
-- [Architecture](#architecture)
-- [Prerequisites](#prerequisites)
-- [Quickstart](#quickstart)
-- [Commands Reference](#commands-reference)
-- [GitHub Deploy Keys](#github-deploy-keys)
-- [Stacks](#stacks)
-- [Port Allocation](#port-allocation)
-- [Security Model](#security-model)
-- [Environment Variables](#environment-variables)
-- [Domain-Based Egress Filtering](#domain-based-egress-filtering)
-- [Troubleshooting](#troubleshooting)
-
-## Architecture
-
-The sandbox uses a three-layer isolation model:
-
-```
-macOS (safe, never touched by agents)
- |
- +-- OrbStack machine "sandbox" (lightweight Ubuntu Noble VM, shared kernel)
-      |
-      +-- Incus (btrfs storage pool, incusbr0 bridge network)
-           |
-           +-- golden-base/ready     (Docker, Node 22, Claude Code, SSH, git, Python 3)
-           +-- golden-rust/ready     (base + Rust toolchain + quality tools)
-           +-- golden-python/ready   (base + Poetry, uv, ruff, mypy, etc.)
-           +-- golden-node/ready     (base + pnpm, yarn, bun, eslint, etc.)
-           +-- golden-go/ready       (base + Go, golangci-lint, govulncheck)
-           +-- golden-dotnet/ready   (base + .NET SDK, dotnet tools)
-           |
-           +-- agent-proj-alpha      (clone of golden-rust)
-           +-- agent-proj-beta       (clone of golden-node)
-           +-- agent-proj-gamma      (clone of golden-python)
-           +-- ...
-```
-
-**Port forwarding** is bidirectional and traverses two hops:
-
-```
-Incus container (app listens on 0.0.0.0:<port>)
-  --> Incus proxy device: listen=tcp:0.0.0.0:<host-port> connect=tcp:127.0.0.1:<port>
-OrbStack machine (now listening on 0.0.0.0:<host-port>)
-  --> OrbStack auto-forward
-macOS localhost:<host-port>
-```
-
-Golden images are btrfs snapshots. Creating a new container is an instant copy-on-write clone -- no reinstalling packages, no waiting.
-
-## Prerequisites
-
-| Requirement | How to install | Why |
-|---|---|---|
-| **macOS** (Apple Silicon or Intel) | -- | Host OS |
-| **OrbStack** | `brew install orbstack` | Lightweight Linux VM runtime |
-| **GitHub CLI (`gh`)** | `brew install gh` then `gh auth login` | Deploy key automation |
-| **Admin access** on target repos | -- | Required to register deploy keys |
-| **16 GB RAM** (recommended) | -- | VM + containers + Docker daemons |
+- **Fully isolated Incus containers** -- agents cannot touch your host filesystem, credentials, or network
+- **Works on macOS (OrbStack) and native Linux** -- all commands auto-detect the platform
+- **Instant container creation** via btrfs copy-on-write snapshots of golden images
+- **Pre-built stacks** for Rust, Python, Node, Go, and .NET (or add your own)
+- **Per-container deploy keys and SSH agent** -- private keys never touch the container's disk
+- **Domain-based egress filtering** -- restrict HTTPS traffic to an approved allowlist
+- **Bidirectional port forwarding** -- access container services from your host and vice versa
 
 ## Quickstart
+
+### macOS Quickstart
+
+**Prerequisite:** Install [OrbStack](https://orbstack.dev/) (`brew install orbstack`).
 
 ```bash
 # 1. Clone and install
@@ -70,9 +24,28 @@ git clone https://github.com/you/sandbox-claude.git
 cd sandbox-claude
 ./install.sh                # Symlinks bin/* into ~/.local/bin
 
-# 2. One-time setup (creates VM, installs Incus, builds golden images)
+# 2. One-time setup (creates OrbStack VM, installs Incus, builds golden images)
 sandbox-setup               # Takes ~10 minutes the first time
+```
 
+### Linux Quickstart
+
+```bash
+# 1. Clone and install
+git clone https://github.com/you/sandbox-claude.git
+cd sandbox-claude
+./install.sh                # Symlinks bin/* into ~/.local/bin
+
+# 2. Install Linux prerequisites (requires sudo, then log out/in)
+sudo sandbox-linux-prereqs  # Installs iptables, curl, gpg, git, gh; adds you to incus-admin
+
+# 3. One-time setup (installs Incus + Squid on host, builds golden images)
+sandbox-setup               # Takes ~10 minutes the first time
+```
+
+### Common Steps (both platforms)
+
+```bash
 # 3. Create a sandbox for your project
 sandbox-create my-project git@github.com:me/my-repo.git --stack rust
 
@@ -90,13 +63,119 @@ sandbox-stop my-project       # Stop (preserves container, can restart)
 sandbox-stop my-project --rm  # Destroy (removes container + deploy key)
 ```
 
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Platform Support](#platform-support)
+- [Prerequisites](#prerequisites)
+- [Commands Reference](#commands-reference)
+- [GitHub Deploy Keys](#github-deploy-keys)
+- [Stacks](#stacks)
+- [Port Allocation](#port-allocation)
+- [Configuration](#configuration)
+  - [Environment Variables](#environment-variables)
+  - [Domain-Based Egress Filtering](#domain-based-egress-filtering)
+- [Security Model](#security-model)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [License](#license)
+
+## Architecture
+
+The sandbox uses a layered isolation model. On macOS there are three layers; on Linux the VM layer is skipped:
+
+```
+macOS path:
+  macOS (safe, never touched by agents)
+   +-- OrbStack machine "sandbox" (lightweight Ubuntu Noble VM)
+        +-- Incus (btrfs storage pool, incusbr0 bridge) → containers
+
+Linux path:
+  Linux host (safe, agents confined to Incus containers)
+   +-- Incus (btrfs storage pool, incusbr0 bridge) → containers
+```
+
+```
+Golden images (shared across both platforms):
+  +-- golden-base/ready     (Docker, Node 22, Claude Code, SSH, git, Python 3)
+  +-- golden-rust/ready     (base + Rust toolchain + quality tools)
+  +-- golden-python/ready   (base + Poetry, uv, ruff, mypy, etc.)
+  +-- golden-node/ready     (base + pnpm, yarn, bun, eslint, etc.)
+  +-- golden-go/ready       (base + Go, golangci-lint, govulncheck)
+  +-- golden-dotnet/ready   (base + .NET SDK, dotnet tools)
+
+Agent containers (instant btrfs copy-on-write clones):
+  +-- agent-proj-alpha      (clone of golden-rust)
+  +-- agent-proj-beta       (clone of golden-node)
+  +-- agent-proj-gamma      (clone of golden-python)
+  +-- ...
+```
+
+**Port forwarding** is bidirectional:
+
+```
+macOS (2 hops):
+  Incus container → Incus proxy device → OrbStack VM → OrbStack auto-forward → macOS localhost
+
+Linux (1 hop):
+  Incus container → Incus proxy device → Linux host localhost
+```
+
+Golden images are btrfs snapshots. Creating a new container is an instant copy-on-write clone -- no reinstalling packages, no waiting.
+
+## Platform Support
+
+The sandbox works on both **macOS** (via OrbStack) and **native Linux** hosts:
+
+| | macOS | Linux |
+|---|---|---|
+| VM layer | OrbStack (Ubuntu Noble) | None (direct host) |
+| Container runtime | Incus inside VM | Incus on host |
+| Squid proxy | Inside VM | On host |
+| Port forwarding | Container → VM → macOS (2 hops) | Container → host (1 hop) |
+| Setup | `sandbox-setup` creates VM + installs everything | `sandbox-setup` installs directly on host |
+
+All `sandbox-*` commands auto-detect the platform and adjust their behavior. No flags or configuration needed.
+
+## Prerequisites
+
+### macOS
+
+| Requirement | How to install | Why |
+|---|---|---|
+| **macOS** (Apple Silicon or Intel) | -- | Host OS |
+| **OrbStack** | `brew install orbstack` | Lightweight Linux VM runtime |
+
+### Linux
+
+Run `sudo sandbox-linux-prereqs` to install everything in this table automatically (except Incus and Squid, which are handled by `sandbox-setup`).
+
+| Requirement | How to install | Why |
+|---|---|---|
+| **Linux** (Ubuntu 22.04+ or Debian 12+) | -- | Host OS |
+| **Incus** | See [Zabbly repo](https://github.com/zabbly/incus) | Container runtime (auto-installed by `sandbox-setup`) |
+| **Squid** | `apt install squid-openssl` | Egress filtering (auto-installed by `sandbox-setup`) |
+| **Root or sudo** | -- | Required for iptables and Incus setup |
+| **`incus-admin` group** | `sudo sandbox-linux-prereqs` or `sudo usermod -aG incus-admin $USER` | Required for non-root Incus access |
+| **`iptables`** | `sudo sandbox-linux-prereqs` or `apt install iptables` | Required for egress filtering |
+| **`curl`, `gpg`, `git`** | `sudo sandbox-linux-prereqs` or `apt install curl gnupg git` | Required by `sandbox-setup` for Incus installation |
+
+### Both Platforms
+
+| Requirement | How to install | Why |
+|---|---|---|
+| **GitHub CLI (`gh`)** | `brew install gh` / `apt install gh` | Deploy key automation |
+| **Admin access** on target repos | -- | Required to register deploy keys |
+| **16 GB RAM** (recommended) | -- | VM + containers + Docker daemons |
+
 ## Commands Reference
 
 ### Overview
 
 | Command | Purpose |
 |---|---|
-| `sandbox-setup` | One-time: create VM, install Incus, build golden images, apply egress rules |
+| `sandbox-linux-prereqs` | Linux only: install system packages and configure group membership before `sandbox-setup` |
+| `sandbox-setup` | One-time: create VM (macOS) or install directly (Linux), set up Incus, build golden images, apply egress rules |
 | `sandbox-create` | Create a new agent container from a golden image |
 | `sandbox` | Session entry point: shell, Claude, or arbitrary command |
 | `sandbox-list` | List all containers with health status |
@@ -104,6 +183,25 @@ sandbox-stop my-project --rm  # Destroy (removes container + deploy key)
 | `sandbox-login` | Authenticate Claude Code via OAuth inside a container |
 | `sandbox-stop` | Stop and optionally remove a container |
 | `sandbox-nuke` | Destroy all agent containers (nuclear option) |
+
+---
+
+### sandbox-linux-prereqs
+
+Install Linux prerequisites for `sandbox-setup`. Idempotent -- safe to re-run. **Linux only; requires sudo.**
+
+```
+sudo sandbox-linux-prereqs
+```
+
+**What it does:**
+
+1. Installs system packages if missing: `iptables`, `curl`, `gnupg`, `git`
+2. Adds the official GitHub CLI apt repository and installs `gh` if missing
+3. Creates the `incus-admin` group if it doesn't exist and adds the current user to it
+4. Warns if a logout/login is required for group membership to take effect
+
+This script does **not** install Incus or Squid -- those are handled by `sandbox-setup`.
 
 ---
 
@@ -121,9 +219,9 @@ sandbox-setup [--rebuild <stack>]
 
 **What it does:**
 
-1. Validates prerequisites (OrbStack, `gh`, `ssh-keygen`)
-2. Creates OrbStack machine `sandbox` (Ubuntu Noble) -- skips if exists
-3. Installs Incus inside the VM (Zabbly repo, btrfs backend, `incusbr0` bridge) -- skips if installed
+1. Validates prerequisites (OrbStack on macOS; Incus on Linux; `gh`, `ssh-keygen` on both)
+2. On macOS: creates OrbStack machine `sandbox` (Ubuntu Noble) -- skips if exists. On Linux: skips VM creation
+3. Installs Incus (inside VM on macOS, directly on host on Linux; Zabbly repo, btrfs backend, `incusbr0` bridge) -- skips if installed
 4. Applies default egress iptables rules on `incusbr0`
 5. Builds golden images: runs `stacks/base.sh` first, then each variant stack. Skips stacks that already have a `ready` snapshot
 
@@ -170,7 +268,7 @@ sandbox-create <name> [repo-url] [flags]
 5. Applies resource limits if `--cpu` or `--memory` are set
 6. Adds Incus proxy devices for SSH, App, and Alt ports
 7. Starts the container
-8. Sets up a dedicated ssh-agent in the OrbStack VM and mounts the socket into the container
+8. Sets up a dedicated ssh-agent in the sandbox environment (OrbStack VM on macOS, host on Linux) and mounts the socket into the container
 9. Injects environment variables from `~/.sandbox/env` and any `--env` overrides into `/root/.bashrc`
 10. If `--restrict-domains` is set: configures Squid SNI filtering, iptables NAT redirect, and QUIC blocking for this container
 11. Clones the repo into `/workspace/project` (with `--branch` if specified)
@@ -221,7 +319,7 @@ sandbox <name> [name2...] [flags]
 | `--claude` | Run Claude Code instead of a shell |
 | `--cmd "<command>"` | Run a specific command |
 
-All sessions use `incus exec` via `orb run` -- no SSH dependency.
+All sessions use `incus exec` (via `orb run` on macOS, directly on Linux) -- no SSH dependency.
 
 ```bash
 # Shell into one container
@@ -279,7 +377,7 @@ Stopped containers show `-` for all health columns.
 
 ### sandbox-expose
 
-Expose additional ports bidirectionally (inbound from macOS to container AND outbound from container to external network).
+Expose additional ports bidirectionally (inbound from host to container AND outbound from container to external network).
 
 ```
 sandbox-expose <name> <port> [protocol]
@@ -293,7 +391,7 @@ sandbox-expose <name> <port> [protocol]
 
 **What it does:**
 
-- **Inbound**: Creates an Incus proxy device so `macOS:port` reaches the container
+- **Inbound**: Creates an Incus proxy device so `host:port` reaches the container
 - **Outbound**: Adds a per-container iptables rule so the container can reach external services on that port
 
 Both directions are opened in a single command.
@@ -323,7 +421,7 @@ sandbox-login <name>
 
 1. Adds a temporary Incus proxy device for the OAuth callback port
 2. Runs `claude login` inside the container via `incus exec`
-3. You complete the OAuth flow in your Mac browser
+3. You complete the OAuth flow in your browser (macOS) or locally (Linux)
 4. The auth token is stored in the container's `~/.claude/` directory (persists across restarts)
 5. Removes the temporary proxy device
 6. Confirms success
@@ -400,7 +498,7 @@ When you create a container with a repo URL (and no `--ssh-key` flag), the deplo
 
 1. Generates an ed25519 key pair at `~/.sandbox/keys/deploy_<name>`
 2. Registers the public key on GitHub via `gh repo deploy-key add -R <org/repo> -t "sandbox-<name>" -w` (the `-w` flag grants write/push access)
-3. Spawns a dedicated ssh-agent process inside the OrbStack VM with its socket at `/tmp/sandbox-agent-<container>.sock`
+3. Spawns a dedicated ssh-agent process in the sandbox environment (OrbStack VM on macOS, host on Linux) with its socket at `/tmp/sandbox-agent-<container>.sock`
 4. Adds the private key to the agent via `ssh-add`
 5. Mounts the agent socket into the container as an Incus disk device at `/run/ssh-agent.sock`
 6. Sets `SSH_AUTH_SOCK=/run/ssh-agent.sock` in the container's `/root/.bashrc`
@@ -514,7 +612,7 @@ For example, a container in slot 3 gets:
 
 ### Extra Ports
 
-Use `sandbox-expose` to open additional ports beyond the standard three. Extra ports are mapped 1:1 (macOS port = container port) and also open outbound access for that port.
+Use `sandbox-expose` to open additional ports beyond the standard three. Extra ports are mapped 1:1 (host port = container port) and also open outbound access for that port.
 
 ```bash
 # Open PostgreSQL port
@@ -528,33 +626,11 @@ sandbox-list
 # ... EXTRA: 5432,6379
 ```
 
-## Security Model
+## Configuration
 
-### What IS Protected
+### Environment Variables
 
-| Boundary | Protection |
-|---|---|
-| **macOS filesystem** | Agents run inside Incus containers inside an OrbStack VM. No macOS filesystem access whatsoever. |
-| **Per-container isolation** | Each container is a separate Incus system container with its own filesystem, process tree, and network namespace. At the network level, `security.port_isolation=true` on the default profile sets the kernel's `IFLA_BRPORT_ISOLATED` flag on each container's veth — containers can only communicate with the bridge gateway (for DNS/DHCP/NAT), not with each other. Combined with `security.ipv4_filtering` and `security.ipv6_filtering` for anti-spoofing. |
-| **SSH private keys** | Private keys live only in ssh-agent memory inside the OrbStack VM. Key material never touches the container's disk. |
-| **Deploy key scoping** | Each deploy key is scoped to a single GitHub repository. A compromised container cannot access other repos. |
-| **Egress filtering** | Default iptables rules on `incusbr0` DROP all outbound traffic except DNS (53), HTTP (80), HTTPS (443), and SSH (22). Containers cannot reach arbitrary services unless explicitly opened with `sandbox-expose`. |
-| **Domain-based HTTPS filtering** | Containers created with `--restrict-domains` can only reach HTTPS endpoints on an approved domain allowlist. Uses Squid in SNI peek/splice mode (inspects TLS ClientHello, no decryption/MITM). QUIC (UDP 443) is blocked for restricted containers. Fail-closed: if Squid is down, traffic hits a closed port. |
-| **Port isolation** | Extra ports opened via `sandbox-expose` are per-container (keyed on container IP). Opening port 5432 on `proj-alpha` does not open it for `proj-beta`. |
-
-### What is NOT Protected by Default
-
-| Risk | Details |
-|---|---|
-| **OrbStack VM access** | All containers share the same OrbStack VM kernel. A container escape (unlikely but theoretically possible) would give access to the VM, though not to macOS. |
-| **Env var exposure** | Environment variables injected via `~/.sandbox/env` or `--env` are written to `/root/.bashrc` inside the container. An agent can read them. This is by design (agents need API keys to function), but be aware. |
-| **Deploy key write access** | Deploy keys are created with `-w` (write) access. An agent can push to the repo it was created for. |
-| **HTTPS traffic content** | Without `--restrict-domains`, egress filtering allows all HTTPS traffic — agents can reach any HTTPS endpoint. Use `--restrict-domains` to limit HTTPS egress to an approved domain allowlist (see [Domain-Based Egress Filtering](#domain-based-egress-filtering)). |
-| **Persistent container state** | Stopping a container preserves its filesystem. Anything the agent wrote remains until the container is destroyed with `--rm`. |
-
-## Environment Variables
-
-### The `~/.sandbox/env` File
+#### The `~/.sandbox/env` File
 
 Create `~/.sandbox/env` to define environment variables that are automatically injected into every container:
 
@@ -567,7 +643,7 @@ MY_CUSTOM_VAR=some-value
 
 This file is read by `sandbox-create` and injected into each container's `/root/.bashrc`. Variables persist across container restarts.
 
-### Per-Container Overrides with `--env`
+#### Per-Container Overrides with `--env`
 
 Add or override environment variables for a specific container:
 
@@ -579,12 +655,12 @@ sandbox-create proj git@github.com:me/repo.git \
 
 The `--env` flag is repeatable. Values provided via `--env` take precedence over values in `~/.sandbox/env`.
 
-### Layering Order
+#### Layering Order
 
 1. `~/.sandbox/env` -- loaded first, applies to all containers
 2. `--env KEY=VALUE` -- per-container overrides, applied after
 
-### env.example Reference
+#### env.example Reference
 
 A typical `~/.sandbox/env` file:
 
@@ -602,15 +678,15 @@ RUST_LOG=debug
 
 The `~/.sandbox/` directory (including `env` and `keys/`) lives outside the repo entirely and is never committed.
 
-## Domain-Based Egress Filtering
+### Domain-Based Egress Filtering
 
 By default, containers can reach any HTTPS endpoint. Use `--restrict-domains` to limit HTTPS egress to an approved domain allowlist, matching the security model Anthropic uses for Claude Code web containers.
 
-### How It Works
+#### How It Works
 
 When a container is created with `--restrict-domains`:
 
-1. **Squid proxy** (installed in the VM by `sandbox-setup`) receives the container's HTTPS/HTTP traffic via iptables NAT PREROUTING redirect
+1. **Squid proxy** (installed in the VM on macOS, on host on Linux, by `sandbox-setup`) receives the container's HTTPS/HTTP traffic via iptables NAT PREROUTING redirect
 2. Squid **peeks at the TLS ClientHello** to read the SNI (Server Name Indication) — the domain the client is connecting to
 3. Squid checks the SNI against the container's **per-container domain allowlist**
 4. **Allowed**: Squid splices the connection through (no decryption, no MITM, no CA cert needed)
@@ -621,7 +697,7 @@ This is **not DNS filtering** — it inspects the actual TLS handshake, so it wo
 
 Unrestricted containers are completely unaffected — their traffic never touches Squid.
 
-### Usage
+#### Usage
 
 ```bash
 # Use the bundled default allowlist (Anthropic's ~190 domains)
@@ -638,7 +714,7 @@ sandbox-list
 sandbox-create my-hotfix --from my-project --branch hotfix/auth
 ```
 
-### Domain File Format
+#### Domain File Format
 
 ```
 # Comments start with #
@@ -656,13 +732,13 @@ pypi.org      # Python packages
 
 A leading dot (`.example.com`) matches `example.com` and all subdomains (`*.example.com`). Without the dot, only the exact domain matches.
 
-### Allowlist Resolution Order
+#### Allowlist Resolution Order
 
 1. **Explicit `--domains-file <path>`** — used if provided
 2. **`~/.sandbox/allowed-domains.txt`** — user override (applies to all containers)
 3. **`domains/anthropic-default.txt`** — bundled default (~190 domains from Anthropic's Claude Code web container list)
 
-### Default Allowlist Categories
+#### Default Allowlist Categories
 
 The bundled `anthropic-default.txt` includes domains for:
 
@@ -680,7 +756,7 @@ The bundled `anthropic-default.txt` includes domains for:
 | Schemas | JSON Schema, SchemaStore |
 | MCP | `*.modelcontextprotocol.io` |
 
-### Customising the Allowlist
+#### Customising the Allowlist
 
 To override the default for all containers, create `~/.sandbox/allowed-domains.txt`:
 
@@ -692,9 +768,35 @@ echo "my-internal-registry.corp.com" >> ~/.sandbox/allowed-domains.txt
 
 Or create a project-specific file and pass it with `--domains-file`.
 
+## Security Model
+
+### What IS Protected
+
+| Boundary | Protection |
+|---|---|
+| **Host filesystem** (macOS / Linux) | Agents run inside Incus containers (inside an OrbStack VM on macOS, directly on host on Linux). No host filesystem access whatsoever. |
+| **Per-container isolation** | Each container is a separate Incus system container with its own filesystem, process tree, and network namespace. At the network level, `security.port_isolation=true` on the default profile sets the kernel's `IFLA_BRPORT_ISOLATED` flag on each container's veth — containers can only communicate with the bridge gateway (for DNS/DHCP/NAT), not with each other. Combined with `security.ipv4_filtering` and `security.ipv6_filtering` for anti-spoofing. |
+| **SSH private keys** | Private keys live only in ssh-agent memory (inside the OrbStack VM on macOS, on the host on Linux). Key material never touches the container's disk. |
+| **Deploy key scoping** | Each deploy key is scoped to a single GitHub repository. A compromised container cannot access other repos. |
+| **Egress filtering** | Default iptables rules on `incusbr0` DROP all outbound traffic except DNS (53), HTTP (80), HTTPS (443), and SSH (22). Containers cannot reach arbitrary services unless explicitly opened with `sandbox-expose`. |
+| **Domain-based HTTPS filtering** | Containers created with `--restrict-domains` can only reach HTTPS endpoints on an approved domain allowlist. Uses Squid in SNI peek/splice mode (inspects TLS ClientHello, no decryption/MITM). QUIC (UDP 443) is blocked for restricted containers. Fail-closed: if Squid is down, traffic hits a closed port. |
+| **Port isolation** | Extra ports opened via `sandbox-expose` are per-container (keyed on container IP). Opening port 5432 on `proj-alpha` does not open it for `proj-beta`. |
+
+### What is NOT Protected by Default
+
+| Risk | Details |
+|---|---|
+| **VM/Host kernel access** | All containers share the same kernel (OrbStack VM on macOS, host on Linux). A container escape (unlikely but theoretically possible) would give access to the VM (macOS) or host (Linux). On macOS, the VM provides an additional isolation boundary. |
+| **Env var exposure** | Environment variables injected via `~/.sandbox/env` or `--env` are written to `/root/.bashrc` inside the container. An agent can read them. This is by design (agents need API keys to function), but be aware. |
+| **Deploy key write access** | Deploy keys are created with `-w` (write) access. An agent can push to the repo it was created for. |
+| **HTTPS traffic content** | Without `--restrict-domains`, egress filtering allows all HTTPS traffic — agents can reach any HTTPS endpoint. Use `--restrict-domains` to limit HTTPS egress to an approved domain allowlist (see [Domain-Based Egress Filtering](#domain-based-egress-filtering)). |
+| **Persistent container state** | Stopping a container preserves its filesystem. Anything the agent wrote remains until the container is destroyed with `--rm`. |
+
 ## Troubleshooting
 
-### Docker Not Working Inside Container
+### Common Issues
+
+#### Docker Not Working Inside Container
 
 **Symptom:** `docker: Cannot connect to the Docker daemon` or similar errors.
 
@@ -714,11 +816,11 @@ sandbox-stop proj-alpha --rm
 sandbox-create proj-alpha git@github.com:me/alpha.git --stack rust
 ```
 
-### Cannot Access Ports from macOS
+#### Cannot Access Ports from Host
 
 **Symptom:** `curl localhost:8001` times out or refuses connection.
 
-**Cause:** The port forwarding chain has two hops (container -> OrbStack -> macOS). A break at either hop causes failures.
+**Cause:** On macOS, the port forwarding chain has two hops (container -> OrbStack -> macOS). On Linux, one hop (container -> host). A break at either hop causes failures.
 
 **Fix:**
 
@@ -731,26 +833,28 @@ sandbox proj-alpha --cmd "ss -tlnp | grep 8080"
 
 # 3. Verify the Incus proxy device exists
 sandbox proj-alpha --cmd "exit"  # just confirm you can connect
-orb run -m sandbox incus config device show agent-proj-alpha
 
-# 4. Check OrbStack is forwarding
+# macOS only: check OrbStack is forwarding
+orb run -m sandbox incus config device show agent-proj-alpha
 orb run -m sandbox ss -tlnp | grep 8001
 ```
 
 Your app must listen on `0.0.0.0` (not `127.0.0.1`) inside the container for port forwarding to work through the Incus proxy device.
 
-### Disk Space Issues
+#### Disk Space Issues
 
 **Symptom:** Containers fail to start or builds fail with "no space left on device".
 
 **Fix:**
 
 ```bash
-# Check disk usage inside the VM
+# Check disk usage
+# macOS:
 orb run -m sandbox df -h
-
-# Check btrfs usage
 orb run -m sandbox btrfs filesystem usage /
+# Linux:
+df -h
+btrfs filesystem usage /  # if using btrfs
 
 # Remove stopped containers to reclaim space
 sandbox-nuke
@@ -760,21 +864,26 @@ sandbox-nuke --all
 sandbox-setup
 ```
 
-### Resource Limits
+#### Resource Limits
 
-By default, containers share the VM's resources without hard limits. If an agent is consuming too much:
+By default, containers share the VM's (macOS) or host's (Linux) resources without hard limits. If an agent is consuming too much:
 
 ```bash
 # Create with limits
 sandbox-create proj git@github.com:me/repo.git --cpu 4 --memory 8GiB
 
 # Or set limits on an existing container (requires stop/start)
+# macOS:
 orb run -m sandbox incus config set agent-proj limits.cpu=4
 orb run -m sandbox incus config set agent-proj limits.memory=8GiB
 orb run -m sandbox incus restart agent-proj
+# Linux:
+incus config set agent-proj limits.cpu=4
+incus config set agent-proj limits.memory=8GiB
+incus restart agent-proj
 ```
 
-### Rebuilding Golden Images
+#### Rebuilding Golden Images
 
 If a golden image becomes stale (outdated packages, broken dependencies):
 
@@ -788,7 +897,7 @@ sandbox-setup --rebuild all
 
 Existing containers are NOT affected by golden image rebuilds. Only new containers created after the rebuild will use the updated image.
 
-### Deploy Key Issues
+#### Deploy Key Issues
 
 **Symptom:** `git push` fails with "Permission denied (publickey)".
 
@@ -813,7 +922,7 @@ sandbox-create proj-alpha git@github.com:me/alpha.git --stack rust
 - Verify `gh auth status` shows a valid session
 - For org repos, check if the org has restrictions on deploy keys
 
-### Claude Auth Issues
+#### Claude Auth Issues
 
 **Symptom:** Claude reports it is not authenticated.
 
@@ -827,7 +936,9 @@ sandbox proj-alpha --cmd "ls -la ~/.claude/"
 
 The auth token is stored inside the container at `~/.claude/` and persists across container restarts. It is lost only when the container is destroyed with `--rm`.
 
-### OrbStack VM Not Starting
+### macOS Issues
+
+#### OrbStack VM Not Starting
 
 ```bash
 # Check OrbStack status
@@ -842,12 +953,42 @@ orb delete sandbox
 sandbox-setup
 ```
 
+### Linux Issues
+
+#### Incus Permission Denied
+
+**Symptom:** `incus list` fails with permission errors.
+
+**Fix:** Ensure your user is in the `incus-admin` group:
+
+```bash
+sudo usermod -aG incus-admin $USER
+newgrp incus-admin  # or log out and back in
+```
+
+#### Outbound Interface Not Detected
+
+**Symptom:** `sandbox-setup` fails during egress filtering, or containers have no internet access.
+
+**Cause:** The outbound network interface is detected from the default route. If no default route exists, detection fails.
+
+**Fix:**
+
+```bash
+# Check your default route
+ip -4 route show default
+
+# If missing, add one (adjust interface name)
+sudo ip route add default via <gateway-ip> dev <interface>
+```
+
 ## Project Structure
 
 ```
 sandbox-claude/
 +-- bin/
 |   +-- sandbox              # Session entry (shell/claude/cmd, auto-tmux)
+|   +-- sandbox-linux-prereqs  # Linux only: install prereqs (iptables, gh, etc.)
 |   +-- sandbox-setup        # One-time: OrbStack VM + Incus + golden images + egress
 |   +-- sandbox-create       # Create container
 |   +-- sandbox-stop         # Stop/remove container
@@ -867,7 +1008,6 @@ sandbox-claude/
 |   +-- go.sh                # Go additions
 |   +-- dotnet.sh            # .NET additions
 +-- install.sh               # Symlinks bin/* into ~/.local/bin
-+-- docs/                    # Design docs (reference)
 +-- .gitignore
 ```
 

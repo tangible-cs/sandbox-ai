@@ -8,10 +8,10 @@ NAME="${1:?Usage: sandbox-stop <name> [--rm]}"
 REMOVE="${2:-}"
 CONTAINER=$(container_name "$NAME")
 
-require_machine
+require_sandbox
 
 # Verify container exists
-orb_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null \
+vm_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null \
   || die "Container '${CONTAINER}' not found"
 
 # Clean up SSH agent
@@ -23,12 +23,12 @@ cleanup_container_domain_filter "$CONTAINER"
 
 # Clean up per-container egress rules
 info "Cleaning up egress rules..."
-CONTAINER_IP=$(orb_exec "
+CONTAINER_IP=$(vm_exec "
   incus list ${CONTAINER} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
 " || true)
 if [[ -n "$CONTAINER_IP" ]]; then
   remove_container_squid_redirect "$CONTAINER_IP"
-  orb_exec "
+  vm_exec "
     iptables -S FORWARD 2>/dev/null | grep '${CONTAINER_IP}' | while read -r rule; do
       iptables \$(echo \"\$rule\" | sed 's/^-A/-D/')
     done
@@ -36,7 +36,7 @@ if [[ -n "$CONTAINER_IP" ]]; then
 fi
 
 # Stop
-orb_exec "incus stop '${CONTAINER}' --force 2>/dev/null || true"
+vm_exec "incus stop '${CONTAINER}' --force 2>/dev/null || true"
 ok "Stopped ${CONTAINER}"
 
 # Remove if --rm
@@ -47,6 +47,6 @@ if [[ "$REMOVE" == "--rm" ]]; then
     deploy_key_cleanup "$NAME" "$REPO"
   fi
 
-  orb_exec "incus delete '${CONTAINER}'"
+  vm_exec "incus delete '${CONTAINER}'"
   ok "Deleted ${CONTAINER}"
 fi

@@ -27,7 +27,7 @@ done
 
 [[ ${#NAMES[@]} -gt 0 ]] || die "Usage: sandbox <name> [name2...] [--claude] [--cmd \"command\"]"
 
-require_machine
+require_sandbox
 
 # ── Build the command to run in each container ──────────────────────
 build_session_cmd() {
@@ -35,15 +35,22 @@ build_session_cmd() {
   local container
   container=$(container_name "$name")
 
+  local exec_prefix
+  if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
+    exec_prefix="orb run -m ${SANDBOX_MACHINE}"
+  else
+    exec_prefix=""
+  fi
+
   case "$MODE" in
     shell)
-      echo "orb run -m ${SANDBOX_MACHINE} incus exec ${container} -- bash"
+      echo "${exec_prefix} incus exec ${container} -- bash"
       ;;
     claude)
-      echo "orb run -m ${SANDBOX_MACHINE} incus exec ${container} -- bash -c 'cd ${WORKSPACE_DIR} 2>/dev/null; claude --dangerously-skip-permissions'"
+      echo "${exec_prefix} incus exec ${container} -- bash -c 'cd ${WORKSPACE_DIR} 2>/dev/null; claude --dangerously-skip-permissions'"
       ;;
     cmd)
-      echo "orb run -m ${SANDBOX_MACHINE} incus exec ${container} -- bash -c '${CMD}'"
+      echo "${exec_prefix} incus exec ${container} -- bash -c '${CMD}'"
       ;;
   esac
 }
@@ -51,7 +58,7 @@ build_session_cmd() {
 # ── Validate all containers exist and are running ───────────────────
 for name in "${NAMES[@]}"; do
   container=$(container_name "$name")
-  state=$(orb_exec "incus info ${container} 2>/dev/null | grep 'Status:' | awk '{print \$2}'" || true)
+  state=$(vm_exec "incus info ${container} 2>/dev/null | grep 'Status:' | awk '{print \$2}'" || true)
   if [[ -z "$state" ]]; then
     die "Container '${container}' not found"
   fi
