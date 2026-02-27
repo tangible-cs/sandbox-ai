@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# sandbox-create <name> [repo-url] [flags]
+# Create a new agent container from a golden image
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+
+# ── Parse args ──────────────────────────────────────────────────────
+NAME=""
+REPO=""
+STACK="base"
+BRANCH=""
+FROM=""
+SSH_KEY=""
+SLOT=""
+CPU=""
+MEMORY=""
+EXTRA_ENVS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stack)   STACK="$2"; shift 2 ;;
+    --branch)  BRANCH="$2"; shift 2 ;;
+    --from)    FROM="$2"; shift 2 ;;
+    --ssh-key) SSH_KEY="$2"; shift 2 ;;
+    --slot)    SLOT="$2"; shift 2 ;;
+    --cpu)     CPU="$2"; shift 2 ;;
+    --memory)  MEMORY="$2"; shift 2 ;;
+    --env)     EXTRA_ENVS+=("$2"); shift 2 ;;
+    --*)       die "Unknown flag: $1" ;;
+    *)
+      if [[ -z "$NAME" ]]; then
+        NAME="$1"
+      elif [[ -z "$REPO" ]]; then
+        REPO="$1"
+      else
+        die "Unexpected argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$NAME" ]] || die "Usage: sandbox-create <name> [repo-url] [flags]"
+
+# ── Resolve --from ──────────────────────────────────────────────────
+if [[ -n "$FROM" ]]; then
+  FROM_CONTAINER=$(container_name "$FROM")
+  require_machine
+
+  if [[ -z "$REPO" ]]; then
+    REPO=$(orb_exec "incus exec ${FROM_CONTAINER} -- git -C ${WORKSPACE_DIR} remote get-url origin 2>/dev/null" || true)
+    [[ -n "$REPO" ]] || die "Could not determine repo URL from container '${FROM_CONTAINER}'"
+    info "Inherited repo: ${REPO}"
+  fi
+
+  if [[ "$STACK" == "base" ]]; then
+    FROM_STACK=$(get_metadata "$FROM_CONTAINER" "stack")
+    if [[ -n "$FROM_STACK" ]]; then
+      STACK="$FROM_STACK"
+      info "Inherited stack: ${STACK}"
+    fi
+  fi
+
+  if [[ -z "$SSH_KEY" ]]; then
+    FROM_KEY="${SANDBOX_KEY_DIR}/deploy_${FROM}"
+    if [[ -f "$FROM_KEY" ]]; then
+      # Don't reuse the key — generate a new one for this container
+      info "Will generate new deploy key (not reusing from '${FROM}')"
+    fi
+  fi
+fi
+
+# ── Validate ────────────────────────────────────────────────────────
+require_machine
+require_golden "$STACK"
+
+CONTAINER=$(container_name "$NAME")
+
+# Check container doesn't already exist
+if orb_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null; then
+  die "Container '${CONTAINER}' already exists. Use 'sandbox-stop ${NAME} --rm' to remove it first."
+fi
+
+# ── Auto-assign or validate slot ────────────────────────────────────
+if [[ -z "$SLOT" ]]; then
+  SLOT=$(next_free_slot)
+  info "Auto-assigned slot: ${SLOT}"
+else
+  validate_slot "$SLOT"
+fi
+
+SSH_P=$(ssh_port "$SLOT")
+APP_P=$(app_port "$SLOT")
+ALT_P=$(alt_port "$SLOT")
+
+# ── Deploy key (auto-generate if repo provided and no --ssh-key) ───
+KEY_PATH=""
+if [[ -n "$REPO" && -z "$SSH_KEY" ]]; then
+  require_gh
+  deploy_key_create "$NAME" "$REPO"
+  KEY_PATH="${SANDBOX_KEY_DIR}/deploy_${NAME}"
+elif [[ -n "$SSH_KEY" ]]; then
+  [[ -f "$SSH_KEY" ]] || die "SSH key not found: ${SSH_KEY}"
+  KEY_PATH="$SSH_KEY"
+fi
+
+# ── Create container ────────────────────────────────────────────────
+info "Creating '${CONTAINER}' from golden-${STACK}/ready (slot ${SLOT})..."
+
+orb_exec "
+  incus copy golden-${STACK}/ready ${CONTAINER}
+"
+
+# Resource limits (only if explicitly set)
+if [[ -n "$CPU" ]]; then
+  orb_exec "incus config set ${CONTAINER} limits.cpu=${CPU}"
+fi
+if [[ -n "$MEMORY" ]]; then
+  orb_exec "incus config set ${CONTAINER} limits.memory=${MEMORY}"
+fi
+
+# Proxy devices for port forwarding
+orb_exec "
+  incus config device add ${CONTAINER} ssh-proxy proxy \
+    listen=tcp:0.0.0.0:${SSH_P} connect=tcp:127.0.0.1:22
+
+  incus config device add ${CONTAINER} app-proxy proxy \
+    listen=tcp:0.0.0.0:${APP_P} connect=tcp:127.0.0.1:8080
+
+  incus config device add ${CONTAINER} alt-proxy proxy \
+    listen=tcp:0.0.0.0:${ALT_P} connect=tcp:127.0.0.1:9090
+"
+
+# Start
+orb_exec "incus start ${CONTAINER}"
+orb_exec "sleep 3"
+
+# ── SSH agent ───────────────────────────────────────────────────────
+if [[ -n "$KEY_PATH" ]]; then
+  info "Setting up SSH agent..."
+  ssh_agent_setup "$CONTAINER" "$KEY_PATH"
+fi
+
+# ── Env vars ────────────────────────────────────────────────────────
+inject_env "$CONTAINER" "${EXTRA_ENVS[@]}"
+
+# ── Store metadata ──────────────────────────────────────────────────
+set_metadata "$CONTAINER" "slot" "$SLOT"
+set_metadata "$CONTAINER" "stack" "$STACK"
+[[ -n "$REPO" ]] && set_metadata "$CONTAINER" "repo" "$REPO"
+
+# ── Clone repo ──────────────────────────────────────────────────────
+if [[ -n "$REPO" ]]; then
+  info "Cloning repository..."
+  CLONE_CMD="git clone"
+  [[ -n "$BRANCH" ]] && CLONE_CMD+=" --branch ${BRANCH}"
+  CLONE_CMD+=" '${REPO}' ${WORKSPACE_DIR}"
+
+  orb_exec "incus exec ${CONTAINER} -- bash -c '${CLONE_CMD}'" \
+    || die "Git clone failed. Check SSH key and repo access."
+  ok "Repository cloned"
+fi
+
+# ── Done ────────────────────────────────────────────────────────────
+echo ""
+ok "=== '${CONTAINER}' ready ==="
+echo ""
+echo "  Slot:      ${SLOT}"
+echo "  Stack:     ${STACK}"
+echo "  SSH:       ssh -o StrictHostKeyChecking=no -p ${SSH_P} root@localhost"
+echo "  VS Code:   code --remote ssh-remote+root@localhost:${SSH_P} ${WORKSPACE_DIR}"
+echo "  App:       http://localhost:${APP_P}"
+echo "  Alt:       http://localhost:${ALT_P}"
+echo ""
+echo "  Shell:     sandbox ${NAME}"
+echo "  Claude:    sandbox ${NAME} --claude"
+[[ -z "$(get_metadata "$CONTAINER" "repo")" ]] || echo "  Login:     sandbox-login ${NAME}"

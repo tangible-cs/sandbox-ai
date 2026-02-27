@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# sandbox-worktree <source-name> <worktree-name> <slot> <branch>
+set -euo pipefail
+
+SOURCE="${1:?Usage: sandbox-worktree <source-name> <worktree-name> <slot> <branch>}"
+NAME="${2:?Worktree container name required}"
+SLOT="${3:?Slot number required}"
+BRANCH="${4:?Branch name required}"
+
+SSH_PORT=$((2200 + SLOT))
+APP_PORT=$((8000 + SLOT))
+ALT_PORT=$((9000 + SLOT))
+SOURCE_CONTAINER="agent-${SOURCE}"
+CONTAINER="agent-${NAME}"
+
+echo "Creating worktree '${CONTAINER}' from '${SOURCE_CONTAINER}' (branch: ${BRANCH})..."
+
+orb run -m sandbox bash << EOF
+set -e
+incus copy golden/ready ${CONTAINER}
+incus config set ${CONTAINER} limits.cpu=4
+incus config set ${CONTAINER} limits.memory=8GiB
+
+incus config device add ${CONTAINER} ssh-proxy proxy \
+  listen=tcp:0.0.0.0:${SSH_PORT} connect=tcp:127.0.0.1:22
+incus config device add ${CONTAINER} app-proxy proxy \
+  listen=tcp:0.0.0.0:${APP_PORT} connect=tcp:127.0.0.1:8080
+incus config device add ${CONTAINER} alt-proxy proxy \
+  listen=tcp:0.0.0.0:${ALT_PORT} connect=tcp:127.0.0.1:9090
+
+incus start ${CONTAINER}
+sleep 3
+
+REPO_URL=\$(incus exec ${SOURCE_CONTAINER} -- git -C /workspace/project remote get-url origin)
+incus exec ${CONTAINER} -- git clone "\${REPO_URL}" /workspace/project
+incus exec ${CONTAINER} -- bash -c "cd /workspace/project && git checkout -b ${BRANCH} 2>/dev/null || git checkout ${BRANCH}"
+EOF
+
+echo ""
+echo "=== Worktree '${CONTAINER}' ready (branch: ${BRANCH}) ==="
+echo "  SSH:  ssh -p ${SSH_PORT} root@localhost"
+echo "  App:  http://localhost:${APP_PORT}"

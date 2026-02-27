@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# sandbox-list — List all agent containers with health status
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+
+require_machine
+
+orb run -m "${SANDBOX_MACHINE}" bash << 'INNERLIST'
+#!/usr/bin/env bash
+
+CONTAINERS=$(incus list -f csv -c n 2>/dev/null | grep "^agent-" || true)
+
+if [ -z "$CONTAINERS" ]; then
+  echo "No agent containers found"
+  exit 0
+fi
+
+# Header
+printf "\n%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-8s %-8s %-8s %s\n" \
+  "CONTAINER" "STATE" "SLOT" "SSH" "APP" "ALT" "EXTRA" "DOCKER" "AGENT" "CLAUDE" "REPO"
+printf "%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-8s %-8s %-8s %s\n" \
+  "─────────" "─────" "────" "───" "───" "───" "─────" "──────" "─────" "──────" "────"
+
+for c in $CONTAINERS; do
+  state=$(incus info "$c" 2>/dev/null | grep "Status:" | awk '{print $2}')
+
+  # Ports
+  ssh_p=$(incus config device get "$c" ssh-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo "-")
+  app_p=$(incus config device get "$c" app-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo "-")
+  alt_p=$(incus config device get "$c" alt-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo "-")
+
+  # Slot (from SSH port)
+  if [ "$ssh_p" != "-" ]; then
+    slot=$(( ssh_p - 2200 ))
+  else
+    slot="-"
+  fi
+
+  # Extra ports
+  extras=""
+  for dev in $(incus config device list "$c" 2>/dev/null | grep "^port-" || true); do
+    port=$(incus config device get "$c" "$dev" listen 2>/dev/null | grep -o '[0-9]*$' || true)
+    if [ -n "$port" ]; then
+      [ -n "$extras" ] && extras="${extras},"
+      extras="${extras}${port}"
+    fi
+  done
+  [ -z "$extras" ] && extras="-"
+
+  # Health checks (only for running containers)
+  docker_status="-"
+  agent_status="-"
+  claude_status="-"
+  repo_info="-"
+
+  if [ "$state" = "RUNNING" ]; then
+    # Docker
+    if incus exec "$c" -- docker info &>/dev/null; then
+      docker_status="ok"
+    else
+      docker_status="err"
+    fi
+
+    # SSH agent
+    agent_out=$(incus exec "$c" -- bash -c 'SSH_AUTH_SOCK=/run/ssh-agent.sock ssh-add -l 2>&1' || true)
+    if echo "$agent_out" | grep -q "no identities"; then
+      agent_status="no-key"
+    elif echo "$agent_out" | grep -q "Could not open\|Error\|refused"; then
+      agent_status="none"
+    elif echo "$agent_out" | grep -qE "^[0-9]"; then
+      agent_status="ok"
+    else
+      agent_status="none"
+    fi
+
+    # Claude auth
+    if incus exec "$c" -- test -d /root/.claude 2>/dev/null && \
+       incus exec "$c" -- bash -c 'ls /root/.claude/.credentials* 2>/dev/null || ls /root/.claude/auth* 2>/dev/null' &>/dev/null; then
+      claude_status="auth'd"
+    else
+      claude_status="no-auth"
+    fi
+
+    # Repo info
+    if incus exec "$c" -- test -d /workspace/project/.git 2>/dev/null; then
+      remote=$(incus exec "$c" -- git -C /workspace/project remote get-url origin 2>/dev/null | sed -E 's#.*github\.com[:/]##; s#\.git$##' || echo "?")
+      branch=$(incus exec "$c" -- git -C /workspace/project branch --show-current 2>/dev/null || echo "?")
+      repo_info="${remote} (${branch})"
+    fi
+  fi
+
+  printf "%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-8s %-8s %-8s %s\n" \
+    "$c" "$state" "$slot" "$ssh_p" "$app_p" "$alt_p" "$extras" \
+    "$docker_status" "$agent_status" "$claude_status" "$repo_info"
+done
+echo ""
+INNERLIST

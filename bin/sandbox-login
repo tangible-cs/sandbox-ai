@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# sandbox-login <name>
+# Authenticate Claude Code via OAuth inside a container
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+
+NAME="${1:?Usage: sandbox-login <name>}"
+CONTAINER=$(container_name "$NAME")
+
+require_machine
+
+# Verify container is running
+STATE=$(orb_exec "incus info ${CONTAINER} 2>/dev/null | grep 'Status:' | awk '{print \$2}'" || true)
+[[ "$STATE" == "RUNNING" ]] || die "Container '${CONTAINER}' is not running (state: ${STATE:-not found})"
+
+info "Starting Claude login flow for '${CONTAINER}'..."
+echo ""
+echo "This will open a browser-based OAuth flow."
+echo "Complete the authentication in your browser when prompted."
+echo ""
+
+# Run claude login interactively inside the container
+# The OAuth callback typically uses localhost which OrbStack auto-forwards
+orb run -m "${SANDBOX_MACHINE}" incus exec "${CONTAINER}" -- bash -c \
+  "claude login"
+
+# Verify success
+if orb_exec "incus exec ${CONTAINER} -- bash -c 'ls /root/.claude/.credentials* 2>/dev/null || ls /root/.claude/auth* 2>/dev/null'" &>/dev/null; then
+  ok "Claude authenticated successfully in '${CONTAINER}'"
+else
+  warn "Authentication may not have completed. Check with: sandbox ${NAME} --cmd 'claude --version'"
+fi

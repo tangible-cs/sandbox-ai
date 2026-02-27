@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# sandbox-stop <n> [--rm]
+set -euo pipefail
+NAME="${1:?Usage: sandbox-stop <n> [--rm]}"
+REMOVE="${2:-}"
+CONTAINER="agent-${NAME}"
+
+orb run -m sandbox bash -c "
+  incus stop '${CONTAINER}' --force 2>/dev/null || true
+  echo 'Stopped ${CONTAINER}'
+  if [ '${REMOVE}' = '--rm' ]; then
+    incus delete '${CONTAINER}'
+    echo 'Deleted ${CONTAINER}'
+  fi
+"

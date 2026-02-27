@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# sandbox-claude <n> [extra-claude-args...]
+set -euo pipefail
+
+NAME="${1:?Usage: sandbox-claude <n> [extra-claude-args...]}"
+shift
+EXTRA_ARGS="${*:-}"
+
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "Error: ANTHROPIC_API_KEY not set"
+  exit 1
+fi
+
+CONTAINER="agent-${NAME}"
+orb run -m sandbox incus exec "${CONTAINER}" -- bash -c \
+  "cd /workspace/project && \
+   export ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY}' && \
+   claude --dangerously-skip-permissions ${EXTRA_ARGS}"

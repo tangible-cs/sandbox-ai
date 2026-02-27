@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# sandbox-expose <name> <port> [protocol]
+# Expose a port bidirectionally: macOS→container (inbound) + container→external (outbound)
+#
+# Protocol: tcp (default), udp, both
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+
+NAME="${1:?Usage: sandbox-expose <name> <port> [protocol]}"
+PORT="${2:?Port number required}"
+PROTO="${3:-tcp}"
+
+CONTAINER=$(container_name "$NAME")
+
+require_machine
+
+# Validate port is a number
+[[ "$PORT" =~ ^[0-9]+$ ]] || die "Port must be a number, got: $PORT"
+
+# Validate protocol
+case "$PROTO" in
+  tcp|udp|both) ;;
+  *) die "Protocol must be tcp, udp, or both — got: $PROTO" ;;
+esac
+
+# Verify container exists
+orb_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null \
+  || die "Container '${CONTAINER}' not found"
+
+# Get container IP for egress rules
+CONTAINER_IP=$(orb_exec "
+  incus list ${CONTAINER} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
+")
+[[ -n "$CONTAINER_IP" ]] || die "Could not determine container IP"
+
+add_port() {
+  local p="$1"
+  local device_name="port-${PORT}-${p}"
+
+  # Inbound: macOS → container
+  orb_exec "
+    incus config device add '${CONTAINER}' '${device_name}' proxy \
+      'listen=${p}:0.0.0.0:${PORT}' \
+      'connect=${p}:127.0.0.1:${PORT}'
+  "
+
+  # Outbound: container → external
+  orb_exec "
+    iptables -I FORWARD -s ${CONTAINER_IP} -o eth0 -p ${p} --dport ${PORT} -j ACCEPT
+  "
+}
+
+case "$PROTO" in
+  tcp)  add_port tcp ;;
+  udp)  add_port udp ;;
+  both) add_port tcp; add_port udp ;;
+esac
+
+ok "Exposed ${CONTAINER}:${PORT} bidirectionally (${PROTO})"

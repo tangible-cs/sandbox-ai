@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# sandbox-nuke [--all]
+# Destroy ALL agent containers. Pass --all to also remove golden images.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+
+FLAG="${1:-}"
+
+require_machine
+
+echo "This will destroy ALL agent containers and their deploy keys."
+read -p "Are you sure? (yes/no): " CONFIRM
+[[ "$CONFIRM" == "yes" ]] || { echo "Aborted"; exit 0; }
+
+# Get list of containers before destroying them
+CONTAINERS=$(orb_exec "incus list -f csv -c n 2>/dev/null | grep '^agent-'" || true)
+
+for container in $CONTAINERS; do
+  name="${container#agent-}"
+
+  # Clean up SSH agent
+  ssh_agent_cleanup "$container"
+
+  # Clean up deploy key
+  repo=$(get_metadata "$container" "repo")
+  if [[ -n "$repo" ]]; then
+    deploy_key_cleanup "$name" "$repo"
+  fi
+
+  # Clean up egress rules
+  container_ip=$(orb_exec "
+    incus list ${container} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
+  " || true)
+  if [[ -n "$container_ip" ]]; then
+    orb_exec "
+      iptables -S FORWARD 2>/dev/null | grep '${container_ip}' | while read -r rule; do
+        iptables \$(echo \"\$rule\" | sed 's/^-A/-D/')
+      done
+    " 2>/dev/null || true
+  fi
+
+  info "Destroying ${container}..."
+  orb_exec "incus delete '${container}' --force"
+done
+
+if [[ "$FLAG" == "--all" ]]; then
+  info "Destroying golden images..."
+  orb_exec "
+    for g in \$(incus list -f csv -c n 2>/dev/null | grep '^golden-'); do
+      echo \"Destroying \$g...\"
+      incus delete \"\$g\" --force
+    done
+  "
+  ok "Everything destroyed. Run 'sandbox-setup' to rebuild."
+else
+  ok "All agent containers destroyed. Golden images preserved."
+fi
+
+# Clean up any remaining local keys
+if [[ -d "${SANDBOX_KEY_DIR}" ]]; then
+  rm -rf "${SANDBOX_KEY_DIR}"
+  info "Cleaned up local deploy keys"
+fi

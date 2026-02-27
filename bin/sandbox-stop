@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# sandbox-stop <name> [--rm]
+# Stop a container. Pass --rm to also delete it and clean up deploy keys.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
+
+NAME="${1:?Usage: sandbox-stop <name> [--rm]}"
+REMOVE="${2:-}"
+CONTAINER=$(container_name "$NAME")
+
+require_machine
+
+# Verify container exists
+orb_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null \
+  || die "Container '${CONTAINER}' not found"
+
+# Clean up SSH agent
+info "Cleaning up SSH agent..."
+ssh_agent_cleanup "$CONTAINER"
+
+# Clean up per-container egress rules
+info "Cleaning up egress rules..."
+CONTAINER_IP=$(orb_exec "
+  incus list ${CONTAINER} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
+" || true)
+if [[ -n "$CONTAINER_IP" ]]; then
+  orb_exec "
+    iptables -S FORWARD 2>/dev/null | grep '${CONTAINER_IP}' | while read -r rule; do
+      iptables \$(echo \"\$rule\" | sed 's/^-A/-D/')
+    done
+  " 2>/dev/null || true
+fi
+
+# Stop
+orb_exec "incus stop '${CONTAINER}' --force 2>/dev/null || true"
+ok "Stopped ${CONTAINER}"
+
+# Remove if --rm
+if [[ "$REMOVE" == "--rm" ]]; then
+  # Clean up deploy key from GitHub
+  REPO=$(get_metadata "$CONTAINER" "repo")
+  if [[ -n "$REPO" ]]; then
+    deploy_key_cleanup "$NAME" "$REPO"
+  fi
+
+  orb_exec "incus delete '${CONTAINER}'"
+  ok "Deleted ${CONTAINER}"
+fi

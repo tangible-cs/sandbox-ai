@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# sandbox-shell <n> [command]
+NAME="${1:?Usage: sandbox-shell <n> [command]}"
+shift
+COMMAND="${*:-bash}"
+orb run -m sandbox incus exec "agent-${NAME}" -- bash -c "${COMMAND}"

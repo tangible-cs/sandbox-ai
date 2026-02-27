@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# sandbox-list — List all agent containers with ports
+orb run -m sandbox bash << 'EOF'
+printf "\n%-30s %-10s %-8s %-8s %-8s\n" "CONTAINER" "STATE" "SSH" "APP" "ALT"
+printf "%-30s %-10s %-8s %-8s %-8s\n" "─────────" "─────" "───" "───" "───"
+
+for c in $(incus list -f csv -c n 2>/dev/null | grep "^agent-"); do
+  state=$(incus info "$c" 2>/dev/null | grep "Status:" | awk '{print $2}')
+  ssh_p=$(incus config device get "$c" ssh-proxy listen 2>/dev/null | grep -oP ':\K\d+$' || echo "-")
+  app_p=$(incus config device get "$c" app-proxy listen 2>/dev/null | grep -oP ':\K\d+$' || echo "-")
+  alt_p=$(incus config device get "$c" alt-proxy listen 2>/dev/null | grep -oP ':\K\d+$' || echo "-")
+  printf "%-30s %-10s %-8s %-8s %-8s\n" "$c" "$state" "$ssh_p" "$app_p" "$alt_p"
+done
+
+echo ""
+for c in $(incus list -f csv -c n 2>/dev/null | grep "^agent-"); do
+  extras=$(incus config device list "$c" 2>/dev/null | grep "^port-" || true)
+  if [ -n "$extras" ]; then
+    echo "Extra ports on $c:"
+    for dev in $extras; do
+      listen=$(incus config device get "$c" "$dev" listen 2>/dev/null)
+      connect=$(incus config device get "$c" "$dev" connect 2>/dev/null)
+      echo "  $listen → $connect"
+    done
+  fi
+done
+EOF
