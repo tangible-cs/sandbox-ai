@@ -16,10 +16,10 @@ if [ -z "$CONTAINERS" ]; then
 fi
 
 # Header
-printf "\n%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-8s %-8s %-8s %s\n" \
-  "CONTAINER" "STATE" "SLOT" "SSH" "APP" "ALT" "EXTRA" "DOCKER" "AGENT" "CLAUDE" "REPO"
-printf "%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-8s %-8s %-8s %s\n" \
-  "─────────" "─────" "────" "───" "───" "───" "─────" "──────" "─────" "──────" "────"
+printf "\n%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-10s %-8s %-8s %-8s %s\n" \
+  "CONTAINER" "STATE" "SLOT" "SSH" "APP" "ALT" "EXTRA" "EGRESS" "DOCKER" "AGENT" "CLAUDE" "REPO"
+printf "%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-10s %-8s %-8s %-8s %s\n" \
+  "─────────" "─────" "────" "───" "───" "───" "─────" "──────" "──────" "─────" "──────" "────"
 
 for c in $CONTAINERS; do
   state=$(incus info "$c" 2>/dev/null | grep "Status:" | awk '{print $2}')
@@ -46,6 +46,13 @@ for c in $CONTAINERS; do
     fi
   done
   [ -z "$extras" ] && extras="-"
+
+  # Egress filtering status (works for running and stopped containers)
+  egress_status="open"
+  restrict=$(incus config get "$c" user.sandbox.restrict-domains 2>/dev/null || true)
+  if [ "$restrict" = "yes" ]; then
+    egress_status="filtered"
+  fi
 
   # Health checks (only for running containers)
   docker_status="-"
@@ -89,9 +96,9 @@ for c in $CONTAINERS; do
     fi
   fi
 
-  printf "%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-8s %-8s %-8s %s\n" \
+  printf "%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-10s %-8s %-8s %-8s %s\n" \
     "$c" "$state" "$slot" "$ssh_p" "$app_p" "$alt_p" "$extras" \
-    "$docker_status" "$agent_status" "$claude_status" "$repo_info"
+    "$egress_status" "$docker_status" "$agent_status" "$claude_status" "$repo_info"
 done
 echo ""
 INNERLIST

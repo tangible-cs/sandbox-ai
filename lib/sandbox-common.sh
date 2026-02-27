@@ -9,6 +9,11 @@ SANDBOX_MACHINE="sandbox"
 SANDBOX_KEY_DIR="${HOME}/.sandbox/keys"
 SANDBOX_ENV_FILE="${HOME}/.sandbox/env"
 WORKSPACE_DIR="/workspace/project"
+SANDBOX_DOMAINS_DIR="${SCRIPT_DIR}/../domains"
+SANDBOX_DEFAULT_DOMAINS="${SANDBOX_DOMAINS_DIR}/anthropic-default.txt"
+SANDBOX_USER_DOMAINS="${HOME}/.sandbox/allowed-domains.txt"
+SQUID_CONF_DIR="/etc/squid/sandbox"
+SQUID_PORT=3129
 
 # ── Colour helpers (no-op if not a terminal) ────────────────────────
 if [[ -t 1 ]]; then
@@ -265,6 +270,173 @@ set_metadata() {
 get_metadata() {
   local container="$1" key="$2"
   orb_exec "incus config get ${container} user.sandbox.${key} 2>/dev/null" || true
+}
+
+# ── Domain-based egress filtering (Squid proxy) ──────────────────
+
+# Resolve which domains file to use: explicit path > user override > bundled default
+resolve_domains_file() {
+  local explicit="${1:-}"
+  if [[ -n "$explicit" ]]; then
+    [[ -f "$explicit" ]] || die "Domains file not found: $explicit"
+    echo "$explicit"
+  elif [[ -f "${SANDBOX_USER_DOMAINS}" ]]; then
+    echo "${SANDBOX_USER_DOMAINS}"
+  elif [[ -f "${SANDBOX_DEFAULT_DOMAINS}" ]]; then
+    echo "${SANDBOX_DEFAULT_DOMAINS}"
+  else
+    die "No domains file found. Expected one of: ${SANDBOX_USER_DOMAINS} or ${SANDBOX_DEFAULT_DOMAINS}"
+  fi
+}
+
+# Parse a domains file: strip comments and blank lines, output clean domain list
+parse_domains_file() {
+  local file="$1"
+  grep -v '^\s*#' "$file" | grep -v '^\s*$' | sed 's/\s*#.*//' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//'
+}
+
+# Install squid-openssl in the VM if not present
+ensure_squid_installed() {
+  orb run -m "${SANDBOX_MACHINE}" bash << 'SQUID_INSTALL'
+set -e
+if command -v squid &>/dev/null; then
+  echo "Squid already installed"
+  exit 0
+fi
+
+apt-get update
+apt-get install -y squid-openssl ssl-cert
+mkdir -p /etc/squid/sandbox/containers
+echo "Squid installed"
+SQUID_INSTALL
+}
+
+# Write base squid.conf with peek/splice SNI filtering config
+deploy_squid_config() {
+  orb run -m "${SANDBOX_MACHINE}" bash << 'SQUID_CONF'
+set -e
+
+CONF_DIR="/etc/squid/sandbox"
+CERT_DIR="/etc/squid/ssl"
+mkdir -p "$CONF_DIR/containers" "$CERT_DIR"
+
+# Generate a dummy self-signed cert (required by Squid ssl-bump even without MITM)
+if [ ! -f "$CERT_DIR/squid-dummy.pem" ]; then
+  openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+    -subj "/CN=sandbox-squid-dummy" \
+    -keyout "$CERT_DIR/squid-dummy.key" \
+    -out "$CERT_DIR/squid-dummy.pem" 2>/dev/null
+  cat "$CERT_DIR/squid-dummy.key" "$CERT_DIR/squid-dummy.pem" > "$CERT_DIR/squid-dummy-combined.pem"
+  chmod 600 "$CERT_DIR/squid-dummy-combined.pem"
+fi
+
+# Initialise SSL db if needed
+if [ ! -d /var/lib/squid/ssl_db ]; then
+  /usr/lib/squid/security_file_certgen -c -s /var/lib/squid/ssl_db -M 4MB 2>/dev/null || true
+  chown -R proxy:proxy /var/lib/squid/ssl_db 2>/dev/null || true
+fi
+
+cat > /etc/squid/squid.conf << 'EOF'
+# Sandbox Squid — SNI-based transparent HTTPS filtering (peek/splice, no MITM)
+
+http_port 3129 transparent ssl-bump \
+  cert=/etc/squid/ssl/squid-dummy-combined.pem \
+  generate-host-certificates=off \
+  dynamic_cert_mem_cache_size=4MB
+
+sslcrtd_program /usr/lib/squid/security_file_certgen -s /var/lib/squid/ssl_db -M 4MB
+
+# Peek at TLS ClientHello to read SNI, then splice (pass-through) or terminate
+acl step1 at_step SslBump1
+
+ssl_bump peek step1
+ssl_bump splice all
+
+# Include per-container ACLs (domain filtering rules)
+include /etc/squid/sandbox/containers/*.conf
+
+# Default: deny everything that reaches Squid (only restricted containers are redirected here)
+http_access deny all
+
+# Logging
+access_log daemon:/var/log/squid/access.log squid
+cache_log /var/log/squid/cache.log
+
+# No caching — we are a pass-through filter, not a cache
+cache deny all
+
+# Misc
+pid_filename /run/squid.pid
+shutdown_lifetime 3 seconds
+EOF
+
+echo "Squid config deployed"
+SQUID_CONF
+}
+
+# Upload domains list and generate per-container Squid ACL, then reload Squid
+setup_container_domain_filter() {
+  local container="$1"
+  local domains_file="$2"
+  local container_ip="$3"
+
+  # Parse domains and upload to VM
+  local parsed_domains
+  parsed_domains=$(parse_domains_file "$domains_file")
+
+  # Convert our format (.example.com for wildcard) to Squid dstdomain format
+  # Squid dstdomain: .example.com matches example.com and *.example.com (same as ours)
+  orb run -m "${SANDBOX_MACHINE}" bash -c "
+    cat > /etc/squid/sandbox/containers/${container}.domains << 'DOMAINS'
+${parsed_domains}
+DOMAINS
+  "
+
+  # Generate per-container ACL config
+  orb run -m "${SANDBOX_MACHINE}" bash -c "
+    cat > /etc/squid/sandbox/containers/${container}.conf << ACL_EOF
+acl ${container}_src src ${container_ip}/32
+acl ${container}_domains dstdomain \"/etc/squid/sandbox/containers/${container}.domains\"
+http_access allow ${container}_src ${container}_domains
+http_access deny ${container}_src
+ACL_EOF
+  "
+
+  # Reload Squid to pick up new ACL
+  orb_exec "squid -k reconfigure 2>/dev/null || systemctl reload squid 2>/dev/null || true"
+}
+
+# Remove per-container Squid ACL and domains file, then reload
+cleanup_container_domain_filter() {
+  local container="$1"
+  orb_exec "
+    rm -f /etc/squid/sandbox/containers/${container}.conf \
+          /etc/squid/sandbox/containers/${container}.domains
+    squid -k reconfigure 2>/dev/null || systemctl reload squid 2>/dev/null || true
+  " 2>/dev/null || true
+}
+
+# Add iptables NAT PREROUTING rules to redirect this container's 443/80 traffic to Squid
+redirect_container_to_squid() {
+  local container_ip="$1"
+  orb_exec "
+    # Redirect HTTPS (443) to Squid
+    iptables -t nat -A PREROUTING -s ${container_ip}/32 -p tcp --dport 443 \
+      -j REDIRECT --to-port ${SQUID_PORT}
+    # Redirect HTTP (80) to Squid
+    iptables -t nat -A PREROUTING -s ${container_ip}/32 -p tcp --dport 80 \
+      -j REDIRECT --to-port ${SQUID_PORT}
+  "
+}
+
+# Remove iptables NAT PREROUTING rules for this container
+remove_container_squid_redirect() {
+  local container_ip="$1"
+  orb_exec "
+    iptables -t nat -S PREROUTING 2>/dev/null | grep '${container_ip}' | while read -r rule; do
+      iptables -t nat \$(echo \"\$rule\" | sed 's/^-A/-D/')
+    done
+  " 2>/dev/null || true
 }
 
 # ── Source this library ─────────────────────────────────────────────

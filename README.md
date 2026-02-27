@@ -13,6 +13,7 @@ Run Claude Code agents in fully isolated Incus containers inside an OrbStack VM 
 - [Port Allocation](#port-allocation)
 - [Security Model](#security-model)
 - [Environment Variables](#environment-variables)
+- [Domain-Based Egress Filtering](#domain-based-egress-filtering)
 - [Troubleshooting](#troubleshooting)
 
 ## Architecture
@@ -157,6 +158,8 @@ sandbox-create <name> [repo-url] [flags]
 | `--cpu <n>` | CPU core limit | No limit (shares VM) |
 | `--memory <size>` | Memory limit (e.g., `8GiB`) | No limit (shares VM) |
 | `--env KEY=VALUE` | Extra environment variable (repeatable) | -- |
+| `--restrict-domains` | Enable domain-based HTTPS egress filtering with default allowlist | Off (all HTTPS allowed) |
+| `--domains-file <path>` | Enable domain filtering with a custom allowlist file | Bundled `anthropic-default.txt` |
 
 **Steps performed:**
 
@@ -169,9 +172,10 @@ sandbox-create <name> [repo-url] [flags]
 7. Starts the container
 8. Sets up a dedicated ssh-agent in the OrbStack VM and mounts the socket into the container
 9. Injects environment variables from `~/.sandbox/env` and any `--env` overrides into `/root/.bashrc`
-10. Clones the repo into `/workspace/project` (with `--branch` if specified)
-11. Stores metadata (stack, repo, slot) in Incus config for later retrieval
-12. Prints connection info
+10. If `--restrict-domains` is set: configures Squid SNI filtering, iptables NAT redirect, and QUIC blocking for this container
+11. Clones the repo into `/workspace/project` (with `--branch` if specified)
+12. Stores metadata (stack, repo, slot, restrict-domains) in Incus config for later retrieval
+13. Prints connection info
 
 ```bash
 # Minimal -- just a scratch container
@@ -191,6 +195,15 @@ sandbox-create proj git@github.com:me/repo.git --ssh-key ~/.ssh/my_key
 
 # Extra env vars
 sandbox-create proj git@github.com:me/repo.git --env DB_HOST=localhost --env DB_PORT=5432
+
+# Restrict HTTPS egress to default allowlist (Anthropic's Claude Code web domains)
+sandbox-create proj git@github.com:me/repo.git --restrict-domains
+
+# Restrict HTTPS egress to a custom allowlist
+sandbox-create proj git@github.com:me/repo.git --domains-file ~/my-domains.txt
+
+# Domain restriction is inherited with --from
+sandbox-create proj-hotfix --from proj --branch hotfix/auth
 ```
 
 ---
@@ -243,16 +256,17 @@ sandbox-list
 No flags. Produces a table like:
 
 ```
-CONTAINER              STATE     SLOT  SSH   APP   ALT   EXTRA          DOCKER  AGENT  CLAUDE  REPO
-agent-proj-alpha       Running   1     2201  8001  9001  5432,6379      ok      ok     auth'd  me/alpha (main)
-agent-proj-beta        Running   2     2202  8002  9002  -              ok      no-key no-auth me/beta (main)
-agent-proj-gamma       Stopped   3     2203  8003  9003  3000           -       -      -       me/gamma (dev)
+CONTAINER              STATE     SLOT  SSH   APP   ALT   EXTRA          EGRESS     DOCKER  AGENT  CLAUDE  REPO
+agent-proj-alpha       Running   1     2201  8001  9001  5432,6379      filtered   ok      ok     auth'd  me/alpha (main)
+agent-proj-beta        Running   2     2202  8002  9002  -              open       ok      no-key no-auth me/beta (main)
+agent-proj-gamma       Stopped   3     2203  8003  9003  3000           open       -       -      -       me/gamma (dev)
 ```
 
 **Health check columns** (checked via `incus exec` into running containers):
 
 | Column | Meaning |
 |---|---|
+| EGRESS | Domain filtering: `filtered` (restricted allowlist) or `open` (all HTTPS allowed) |
 | DOCKER | `docker info` succeeds: `ok`, fails: `err` |
 | AGENT | `ssh-add -l` succeeds: `ok`, no keys loaded: `no-key`, no socket: `none` |
 | CLAUDE | Auth token in `~/.claude/`: `auth'd`, missing: `no-auth` |
@@ -521,21 +535,21 @@ sandbox-list
 | Boundary | Protection |
 |---|---|
 | **macOS filesystem** | Agents run inside Incus containers inside an OrbStack VM. No macOS filesystem access whatsoever. |
-| **Per-container isolation** | Each container is a separate Incus system container with its own filesystem, process tree, and network namespace. Containers cannot see each other. |
+| **Per-container isolation** | Each container is a separate Incus system container with its own filesystem, process tree, and network namespace. At the network level, `security.port_isolation=true` on the default profile sets the kernel's `IFLA_BRPORT_ISOLATED` flag on each container's veth — containers can only communicate with the bridge gateway (for DNS/DHCP/NAT), not with each other. Combined with `security.ipv4_filtering` and `security.ipv6_filtering` for anti-spoofing. |
 | **SSH private keys** | Private keys live only in ssh-agent memory inside the OrbStack VM. Key material never touches the container's disk. |
 | **Deploy key scoping** | Each deploy key is scoped to a single GitHub repository. A compromised container cannot access other repos. |
 | **Egress filtering** | Default iptables rules on `incusbr0` DROP all outbound traffic except DNS (53), HTTP (80), HTTPS (443), and SSH (22). Containers cannot reach arbitrary services unless explicitly opened with `sandbox-expose`. |
+| **Domain-based HTTPS filtering** | Containers created with `--restrict-domains` can only reach HTTPS endpoints on an approved domain allowlist. Uses Squid in SNI peek/splice mode (inspects TLS ClientHello, no decryption/MITM). QUIC (UDP 443) is blocked for restricted containers. Fail-closed: if Squid is down, traffic hits a closed port. |
 | **Port isolation** | Extra ports opened via `sandbox-expose` are per-container (keyed on container IP). Opening port 5432 on `proj-alpha` does not open it for `proj-beta`. |
 
 ### What is NOT Protected by Default
 
 | Risk | Details |
 |---|---|
-| **Container-to-container via bridge** | Containers on the same `incusbr0` bridge can potentially reach each other. Incus profile-level network isolation is not enforced by default. |
 | **OrbStack VM access** | All containers share the same OrbStack VM kernel. A container escape (unlikely but theoretically possible) would give access to the VM, though not to macOS. |
 | **Env var exposure** | Environment variables injected via `~/.sandbox/env` or `--env` are written to `/root/.bashrc` inside the container. An agent can read them. This is by design (agents need API keys to function), but be aware. |
 | **Deploy key write access** | Deploy keys are created with `-w` (write) access. An agent can push to the repo it was created for. |
-| **HTTPS traffic content** | Egress filtering allows all HTTPS traffic. Agents can reach any HTTPS endpoint (npm registry, PyPI, crates.io, but also arbitrary APIs). Content inspection is not performed. |
+| **HTTPS traffic content** | Without `--restrict-domains`, egress filtering allows all HTTPS traffic — agents can reach any HTTPS endpoint. Use `--restrict-domains` to limit HTTPS egress to an approved domain allowlist (see [Domain-Based Egress Filtering](#domain-based-egress-filtering)). |
 | **Persistent container state** | Stopping a container preserves its filesystem. Anything the agent wrote remains until the container is destroyed with `--rm`. |
 
 ## Environment Variables
@@ -587,6 +601,96 @@ RUST_LOG=debug
 ```
 
 The `~/.sandbox/` directory (including `env` and `keys/`) lives outside the repo entirely and is never committed.
+
+## Domain-Based Egress Filtering
+
+By default, containers can reach any HTTPS endpoint. Use `--restrict-domains` to limit HTTPS egress to an approved domain allowlist, matching the security model Anthropic uses for Claude Code web containers.
+
+### How It Works
+
+When a container is created with `--restrict-domains`:
+
+1. **Squid proxy** (installed in the VM by `sandbox-setup`) receives the container's HTTPS/HTTP traffic via iptables NAT PREROUTING redirect
+2. Squid **peeks at the TLS ClientHello** to read the SNI (Server Name Indication) — the domain the client is connecting to
+3. Squid checks the SNI against the container's **per-container domain allowlist**
+4. **Allowed**: Squid splices the connection through (no decryption, no MITM, no CA cert needed)
+5. **Denied**: Squid resets the connection (TCP RST)
+6. **QUIC bypass** is prevented: UDP port 443 is blocked for restricted containers
+
+This is **not DNS filtering** — it inspects the actual TLS handshake, so it works regardless of how the IP was resolved (hardcoded IPs, CDN shared IPs, etc.).
+
+Unrestricted containers are completely unaffected — their traffic never touches Squid.
+
+### Usage
+
+```bash
+# Use the bundled default allowlist (Anthropic's ~190 domains)
+sandbox-create my-project git@github.com:me/repo.git --restrict-domains
+
+# Use a custom allowlist
+sandbox-create my-project git@github.com:me/repo.git --domains-file ~/my-domains.txt
+
+# Check filtering status
+sandbox-list
+# EGRESS column shows "filtered" or "open"
+
+# Inherited when using --from
+sandbox-create my-hotfix --from my-project --branch hotfix/auth
+```
+
+### Domain File Format
+
+```
+# Comments start with #
+# Blank lines are ignored
+
+# Exact match — only this domain
+registry.npmjs.org
+
+# Wildcard match — domain + all subdomains
+.googleapis.com
+
+# Inline comments
+pypi.org      # Python packages
+```
+
+A leading dot (`.example.com`) matches `example.com` and all subdomains (`*.example.com`). Without the dot, only the exact domain matches.
+
+### Allowlist Resolution Order
+
+1. **Explicit `--domains-file <path>`** — used if provided
+2. **`~/.sandbox/allowed-domains.txt`** — user override (applies to all containers)
+3. **`domains/anthropic-default.txt`** — bundled default (~190 domains from Anthropic's Claude Code web container list)
+
+### Default Allowlist Categories
+
+The bundled `anthropic-default.txt` includes domains for:
+
+| Category | Examples |
+|---|---|
+| Anthropic services | `api.anthropic.com`, `claude.ai` |
+| Version control | GitHub, GitLab, Bitbucket |
+| Container registries | Docker Hub, GCR, GHCR, ECR, MCR |
+| Cloud platforms | AWS, GCP, Azure, Oracle |
+| Package managers | npm, PyPI, RubyGems, crates.io, Go proxy, Maven, NuGet, Hex, pub.dev, CocoaPods, CPAN, Hackage |
+| Linux repos | Ubuntu archives, Launchpad PPAs |
+| Dev tools | Kubernetes, HashiCorp, Anaconda, Apache, Eclipse, Node.js |
+| Monitoring | Sentry, Datadog, Statsig |
+| CDNs/mirrors | SourceForge, Packagecloud |
+| Schemas | JSON Schema, SchemaStore |
+| MCP | `*.modelcontextprotocol.io` |
+
+### Customising the Allowlist
+
+To override the default for all containers, create `~/.sandbox/allowed-domains.txt`:
+
+```bash
+# Start from the bundled default and add your domains
+cp domains/anthropic-default.txt ~/.sandbox/allowed-domains.txt
+echo "my-internal-registry.corp.com" >> ~/.sandbox/allowed-domains.txt
+```
+
+Or create a project-specific file and pass it with `--domains-file`.
 
 ## Troubleshooting
 
@@ -751,8 +855,10 @@ sandbox-claude/
 |   +-- sandbox-list         # List containers with health
 |   +-- sandbox-expose       # Expose extra ports (bidirectional)
 |   +-- sandbox-login        # Claude OAuth login flow
++-- domains/
+|   +-- anthropic-default.txt  # Default domain allowlist (~190 domains)
 +-- lib/
-|   +-- sandbox-common.sh    # Shared functions (slot mgmt, deploy keys, ssh-agent, env)
+|   +-- sandbox-common.sh    # Shared functions (slot mgmt, deploy keys, ssh-agent, env, domain filtering)
 +-- stacks/
 |   +-- base.sh              # Core golden image
 |   +-- rust.sh              # Rust additions

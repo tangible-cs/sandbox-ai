@@ -21,17 +21,21 @@ for container in $CONTAINERS; do
   # Clean up SSH agent
   ssh_agent_cleanup "$container"
 
+  # Clean up domain filtering (Squid ACL)
+  cleanup_container_domain_filter "$container"
+
   # Clean up deploy key
   repo=$(get_metadata "$container" "repo")
   if [[ -n "$repo" ]]; then
     deploy_key_cleanup "$name" "$repo"
   fi
 
-  # Clean up egress rules
+  # Clean up egress rules (FORWARD + NAT)
   container_ip=$(orb_exec "
     incus list ${container} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
   " || true)
   if [[ -n "$container_ip" ]]; then
+    remove_container_squid_redirect "$container_ip"
     orb_exec "
       iptables -S FORWARD 2>/dev/null | grep '${container_ip}' | while read -r rule; do
         iptables \$(echo \"\$rule\" | sed 's/^-A/-D/')

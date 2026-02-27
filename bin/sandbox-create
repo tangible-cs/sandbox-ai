@@ -15,18 +15,22 @@ SLOT=""
 CPU=""
 MEMORY=""
 EXTRA_ENVS=()
+RESTRICT_DOMAINS=""
+DOMAINS_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --stack)   STACK="$2"; shift 2 ;;
-    --branch)  BRANCH="$2"; shift 2 ;;
-    --from)    FROM="$2"; shift 2 ;;
-    --ssh-key) SSH_KEY="$2"; shift 2 ;;
-    --slot)    SLOT="$2"; shift 2 ;;
-    --cpu)     CPU="$2"; shift 2 ;;
-    --memory)  MEMORY="$2"; shift 2 ;;
-    --env)     EXTRA_ENVS+=("$2"); shift 2 ;;
-    --*)       die "Unknown flag: $1" ;;
+    --stack)            STACK="$2"; shift 2 ;;
+    --branch)           BRANCH="$2"; shift 2 ;;
+    --from)             FROM="$2"; shift 2 ;;
+    --ssh-key)          SSH_KEY="$2"; shift 2 ;;
+    --slot)             SLOT="$2"; shift 2 ;;
+    --cpu)              CPU="$2"; shift 2 ;;
+    --memory)           MEMORY="$2"; shift 2 ;;
+    --env)              EXTRA_ENVS+=("$2"); shift 2 ;;
+    --restrict-domains) RESTRICT_DOMAINS="yes"; shift ;;
+    --domains-file)     RESTRICT_DOMAINS="yes"; DOMAINS_FILE="$2"; shift 2 ;;
+    --*)                die "Unknown flag: $1" ;;
     *)
       if [[ -z "$NAME" ]]; then
         NAME="$1"
@@ -66,6 +70,22 @@ if [[ -n "$FROM" ]]; then
     if [[ -f "$FROM_KEY" ]]; then
       # Don't reuse the key — generate a new one for this container
       info "Will generate new deploy key (not reusing from '${FROM}')"
+    fi
+  fi
+
+  # Inherit domain restriction if not explicitly set
+  if [[ -z "$RESTRICT_DOMAINS" ]]; then
+    FROM_RESTRICT=$(get_metadata "$FROM_CONTAINER" "restrict-domains")
+    if [[ "$FROM_RESTRICT" == "yes" ]]; then
+      RESTRICT_DOMAINS="yes"
+      info "Inherited domain restriction from '${FROM}'"
+      if [[ -z "$DOMAINS_FILE" ]]; then
+        FROM_DOMAINS_FILE=$(get_metadata "$FROM_CONTAINER" "domains-file")
+        if [[ -n "$FROM_DOMAINS_FILE" ]]; then
+          DOMAINS_FILE="$FROM_DOMAINS_FILE"
+          info "Inherited domains file: ${DOMAINS_FILE}"
+        fi
+      fi
     fi
   fi
 fi
@@ -144,10 +164,34 @@ fi
 # ── Env vars ────────────────────────────────────────────────────────
 inject_env "$CONTAINER" "${EXTRA_ENVS[@]}"
 
+# ── Domain filtering ───────────────────────────────────────────────
+if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
+  info "Applying domain-based egress filtering..."
+  RESOLVED_DOMAINS_FILE=$(resolve_domains_file "$DOMAINS_FILE")
+  RESOLVED_DOMAINS_NAME=$(basename "$RESOLVED_DOMAINS_FILE")
+
+  CONTAINER_IP=$(orb_exec "
+    incus list ${CONTAINER} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
+  ")
+  [[ -n "$CONTAINER_IP" ]] || die "Could not determine container IP for domain filtering"
+
+  setup_container_domain_filter "$CONTAINER" "$RESOLVED_DOMAINS_FILE" "$CONTAINER_IP"
+  redirect_container_to_squid "$CONTAINER_IP"
+
+  # Block UDP 443 for this container (prevent QUIC bypass)
+  orb_exec "iptables -I FORWARD -s ${CONTAINER_IP} -o eth0 -p udp --dport 443 -j DROP"
+
+  ok "Domain filtering active (${RESOLVED_DOMAINS_NAME})"
+fi
+
 # ── Store metadata ──────────────────────────────────────────────────
 set_metadata "$CONTAINER" "slot" "$SLOT"
 set_metadata "$CONTAINER" "stack" "$STACK"
 [[ -n "$REPO" ]] && set_metadata "$CONTAINER" "repo" "$REPO"
+if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
+  set_metadata "$CONTAINER" "restrict-domains" "yes"
+  [[ -n "$DOMAINS_FILE" ]] && set_metadata "$CONTAINER" "domains-file" "$DOMAINS_FILE"
+fi
 
 # ── Clone repo ──────────────────────────────────────────────────────
 if [[ -n "$REPO" ]]; then
@@ -167,6 +211,11 @@ ok "=== '${CONTAINER}' ready ==="
 echo ""
 echo "  Slot:      ${SLOT}"
 echo "  Stack:     ${STACK}"
+if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
+  echo "  Domains:   RESTRICTED (${RESOLVED_DOMAINS_NAME:-default})"
+else
+  echo "  Domains:   open (all HTTPS allowed)"
+fi
 echo "  SSH:       ssh -o StrictHostKeyChecking=no -p ${SSH_P} root@localhost"
 echo "  VS Code:   code --remote ssh-remote+root@localhost:${SSH_P} ${WORKSPACE_DIR}"
 echo "  App:       http://localhost:${APP_P}"
