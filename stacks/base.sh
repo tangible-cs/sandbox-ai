@@ -50,8 +50,8 @@ systemctl enable docker
 systemctl enable ssh
 
 # Create workspace (owned by ubuntu)
-mkdir -p /workspace
-chown ubuntu:ubuntu /workspace
+mkdir -p /workspace/project
+chown -R ubuntu:ubuntu /workspace
 
 # Cleanup
 apt-get clean

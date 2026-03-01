@@ -127,8 +127,9 @@ Each container is assigned a **slot** (1-99), auto-assigned or set with `--slot`
 | **SSH** | 2200 + slot | 2201-2299 | 22 |
 | **App** | 8000 + slot | 8001-8099 | 8080 |
 | **Alt** | 9000 + slot | 9001-9099 | 9090 |
+| **Extra** | port + slot | varies | user-specified |
 
-For example, slot 3 → SSH `localhost:2203`, App `localhost:8003`, Alt `localhost:9003`. Use [`sandbox-expose`](#sandbox-expose) to open additional ports (mapped 1:1, bidirectional).
+For example, slot 3 → SSH `localhost:2203`, App `localhost:8003`, Alt `localhost:9003`. Use [`sandbox-expose`](#sandbox-expose) to open additional ports with the same slot-based offset (e.g. port 5432 on slot 3 → `localhost:5435`). Use `--host-port` to override the computed host port.
 
 Golden images are btrfs snapshots. Creating a new container is an instant copy-on-write clone -- no reinstalling packages, no waiting.
 
@@ -387,7 +388,7 @@ agent-proj-gamma       Stopped   3     2203  8003  9003  3000           open    
 | AGENT | `ssh-add -l` succeeds: `ok`, no keys loaded: `no-key`, no socket: `none` |
 | CLAUDE | Auth token in `~/.claude/`: `auth'd`, missing: `no-auth` |
 | REPO | Shortened git remote URL + current branch |
-| EXTRA | Comma-separated list of additionally exposed ports |
+| EXTRA | Additionally exposed ports, shown as `host→container` when ports differ (e.g. `5435→5432`) |
 
 Stopped containers show `-` for all health columns.
 
@@ -398,7 +399,7 @@ Stopped containers show `-` for all health columns.
 Expose additional ports bidirectionally (inbound from host to container AND outbound from container to external network).
 
 ```
-sandbox-expose <name> <port> [protocol]
+sandbox-expose <name> <port> [protocol] [--host-port <N>]
 ```
 
 | Argument | Description | Default |
@@ -406,17 +407,22 @@ sandbox-expose <name> <port> [protocol]
 | `<name>` | Container name (without `agent-` prefix) | Required |
 | `<port>` | Port number to expose | Required |
 | `[protocol]` | `tcp`, `udp`, or `both` | `tcp` |
+| `--host-port <N>` | Override the host-side listen port | `port + slot` |
 
 **What it does:**
 
-- **Inbound**: Creates an Incus proxy device so `host:port` reaches the container
+- **Inbound**: Creates an Incus proxy device so `host:host_port` reaches the container on `port`. The host port defaults to `port + slot`, guaranteeing uniqueness across containers.
 - **Outbound**: Adds a per-container iptables rule so the container can reach external services on that port
+- **Conflict detection**: Checks that no other container is already using the computed host port
 
 Both directions are opened in a single command.
 
 ```bash
-# Expose PostgreSQL (TCP both directions)
+# Expose PostgreSQL (slot 3 → host listens on 5435, connects to container 5432)
 sandbox-expose proj-alpha 5432
+
+# Explicit host port override
+sandbox-expose proj-alpha 5432 --host-port 15432
 
 # Expose a UDP port
 sandbox-expose proj-alpha 5432 udp
@@ -661,7 +667,7 @@ Or create a project-specific file and pass it with `--domains-file`.
 | **Deploy key scoping** | Each deploy key is scoped to a single GitHub repository. A compromised container cannot access other repos. |
 | **Egress filtering** | Default iptables rules on `incusbr0` DROP all outbound traffic except DNS (53), HTTP (80), HTTPS (443), and SSH (22). Containers cannot reach arbitrary services unless explicitly opened with `sandbox-expose`. |
 | **Domain-based HTTPS filtering** | Containers created with `--restrict-domains` can only reach HTTPS endpoints on an approved domain allowlist. Uses Squid in SNI peek/splice mode (inspects TLS ClientHello, no decryption/MITM). QUIC (UDP 443) is blocked for restricted containers. Fail-closed: if Squid is down, traffic hits a closed port. |
-| **Port isolation** | Extra ports opened via `sandbox-expose` are per-container (keyed on container IP). Opening port 5432 on `proj-alpha` does not open it for `proj-beta`. |
+| **Port isolation** | Extra ports opened via `sandbox-expose` use slot-based offsets (`port + slot`) so each container maps to a unique host port. Conflict detection prevents two containers from binding the same host port. Opening port 5432 on `proj-alpha` (slot 3 → host 5435) does not conflict with `proj-beta` (slot 5 → host 5437). |
 
 ### What is NOT Protected by Default
 

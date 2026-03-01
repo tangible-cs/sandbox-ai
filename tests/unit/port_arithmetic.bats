@@ -36,3 +36,33 @@ load '../test_helper/common'
   assert_success
   assert_output "9099"
 }
+
+@test "exposed_host_port: port 5432 slot 3 returns 5435" {
+  run exposed_host_port 5432 3
+  assert_success
+  assert_output "5435"
+}
+
+@test "exposed_host_port: port 5432 slot 7 returns 5439" {
+  run exposed_host_port 5432 7
+  assert_success
+  assert_output "5439"
+}
+
+@test "exposed_host_port: port 3000 slot 1 returns 3001" {
+  run exposed_host_port 3000 1
+  assert_success
+  assert_output "3001"
+}
+
+@test "exposed_host_port: port 80 slot 50 returns 130" {
+  run exposed_host_port 80 50
+  assert_success
+  assert_output "130"
+}
+
+@test "exposed_host_port: port 443 slot 99 returns 542" {
+  run exposed_host_port 443 99
+  assert_success
+  assert_output "542"
+}

@@ -126,6 +126,26 @@ container_name() {
 ssh_port()  { echo $(( 2200 + $1 )); }
 app_port()  { echo $(( 8000 + $1 )); }
 alt_port()  { echo $(( 9000 + $1 )); }
+exposed_host_port() { echo $(( $1 + $2 )); }
+
+# Check if a host port is already in use by another container's proxy device.
+# Returns the conflicting container name, or empty string if no conflict.
+# Usage: check_port_conflict <host_port> <protocol> <self_container>
+check_port_conflict() {
+  local host_port="$1" proto="$2" self="$3"
+  vm_exec "
+    for c in \$(incus list -f csv -c n 2>/dev/null | grep '^agent-'); do
+      [ \"\$c\" = '${self}' ] && continue
+      for dev in \$(incus config device list \"\$c\" 2>/dev/null | grep '^port-' || true); do
+        listen=\$(incus config device get \"\$c\" \"\$dev\" listen 2>/dev/null || true)
+        if echo \"\$listen\" | grep -q '^${proto}:.*:${host_port}\$'; then
+          echo \"\$c\"
+          exit 0
+        fi
+      done
+    done
+  " 2>/dev/null || true
+}
 
 # Returns list of currently used slots by querying ssh-proxy listen ports
 used_slots() {
@@ -308,7 +328,8 @@ inject_env() {
     env_lines+=("$e")
   done
 
-  # Inject into container's ubuntu user bashrc
+  # Inject into /etc/profile.d so env vars are available to all login shells
+  # (bash -lc, ssh sessions, etc.) regardless of which user runs the shell.
   if [[ ${#env_lines[@]} -gt 0 ]]; then
     local export_block=""
     for line in "${env_lines[@]}"; do
@@ -320,7 +341,7 @@ inject_env() {
       fi
     done
     vm_exec "
-      incus exec ${container} -- bash -c 'echo -e \"${export_block}\" >> ${SANDBOX_USER_HOME}/.bashrc'
+      incus exec ${container} -- bash -c 'echo -e \"${export_block}\" >> /etc/profile.d/sandbox-env.sh'
     "
   fi
 }

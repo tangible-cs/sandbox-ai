@@ -16,9 +16,9 @@ if [ -z "$CONTAINERS" ]; then
 fi
 
 # Header
-printf "\n%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-10s %-8s %-8s %-8s %s\n" \
+printf "\n%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %s\n" \
   "CONTAINER" "STATE" "SLOT" "SSH" "APP" "ALT" "EXTRA" "EGRESS" "DOCKER" "AGENT" "CLAUDE" "REPO"
-printf "%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-10s %-8s %-8s %-8s %s\n" \
+printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %s\n" \
   "─────────" "─────" "────" "───" "───" "───" "─────" "──────" "──────" "─────" "──────" "────"
 
 for c in $CONTAINERS; do
@@ -36,13 +36,18 @@ for c in $CONTAINERS; do
     slot="-"
   fi
 
-  # Extra ports
+  # Extra ports (show host→container when they differ)
   extras=""
   for dev in $(incus config device list "$c" 2>/dev/null | grep "^port-" || true); do
-    port=$(incus config device get "$c" "$dev" listen 2>/dev/null | grep -o '[0-9]*$' || true)
-    if [ -n "$port" ]; then
+    listen_port=$(incus config device get "$c" "$dev" listen 2>/dev/null | grep -o '[0-9]*$' || true)
+    connect_port=$(incus config device get "$c" "$dev" connect 2>/dev/null | grep -o '[0-9]*$' || true)
+    if [ -n "$listen_port" ]; then
       [ -n "$extras" ] && extras="${extras},"
-      extras="${extras}${port}"
+      if [ -n "$connect_port" ] && [ "$listen_port" != "$connect_port" ]; then
+        extras="${extras}${listen_port}→${connect_port}"
+      else
+        extras="${extras}${listen_port}"
+      fi
     fi
   done
   [ -z "$extras" ] && extras="-"
@@ -96,7 +101,7 @@ for c in $CONTAINERS; do
     fi
   fi
 
-  printf "%-25s %-9s %-5s %-6s %-6s %-6s %-14s %-10s %-8s %-8s %-8s %s\n" \
+  printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %s\n" \
     "$c" "$state" "$slot" "$ssh_p" "$app_p" "$alt_p" "$extras" \
     "$egress_status" "$docker_status" "$agent_status" "$claude_status" "$repo_info"
 done

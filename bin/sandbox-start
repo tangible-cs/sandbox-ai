@@ -87,6 +87,9 @@ if [[ "$CONTAINER_STATE" == "STOPPED" ]]; then
     sleep 1
   done
 
+  # Ensure workspace directory exists (may be missing in containers from old golden images)
+  vm_exec "incus exec ${CONTAINER} -- bash -c 'mkdir -p ${WORKSPACE_DIR} && chown ${SANDBOX_UID}:${SANDBOX_GID} ${WORKSPACE_DIR}'"
+
   # Apply reconfigurable flags if provided
   if [[ -n "$CPU" ]]; then
     info "Updating CPU limit to ${CPU}..."
@@ -358,6 +361,12 @@ if [[ -n "$REPO" ]]; then
     bash -c "git config --global safe.directory '*' && SSH_AUTH_SOCK=/run/ssh-agent.sock ${CLONE_ARGS}" \
     || die "Git clone failed. Check SSH key and repo access."
   ok "Repository cloned"
+fi
+
+# Ensure workspace directory exists for scratch containers (no repo)
+if [[ -z "$REPO" ]]; then
+  vm_run incus exec "${CONTAINER}" --user ${SANDBOX_UID} --group ${SANDBOX_GID} -- \
+    mkdir -p "${WORKSPACE_DIR}"
 fi
 
 # ── Done ────────────────────────────────────────────────────────────

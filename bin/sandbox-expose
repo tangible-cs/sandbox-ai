@@ -1,14 +1,45 @@
 #!/usr/bin/env bash
-# sandbox-expose <name> <port> [protocol]
+# sandbox-expose <name> <port> [protocol] [--host-port <N>]
 # Expose a port bidirectionally: macOS→container (inbound) + container→external (outbound)
+#
+# Host port defaults to container_port + slot (slot-based offset).
+# Use --host-port to override with a specific host port.
 #
 # Protocol: tcp (default), udp, both
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
-NAME="${1:?Usage: sandbox-expose <name> <port> [protocol]}"
-PORT="${2:?Port number required}"
-PROTO="${3:-tcp}"
+# ── Argument parsing ──────────────────────────────────────────────
+NAME=""
+PORT=""
+PROTO="tcp"
+HOST_PORT_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host-port)
+      [[ -n "${2:-}" ]] || die "--host-port requires a value"
+      HOST_PORT_OVERRIDE="$2"
+      shift 2
+      ;;
+    -*)
+      die "Unknown option: $1"
+      ;;
+    *)
+      if [[ -z "$NAME" ]]; then
+        NAME="$1"
+      elif [[ -z "$PORT" ]]; then
+        PORT="$1"
+      else
+        PROTO="$1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$NAME" ]] || die "Usage: sandbox-expose <name> <port> [protocol] [--host-port <N>]"
+[[ -n "$PORT" ]] || die "Port number required"
 
 CONTAINER=$(container_name "$NAME")
 
@@ -27,6 +58,36 @@ esac
 vm_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null \
   || die "Container '${CONTAINER}' not found"
 
+# ── Slot-based host port computation ─────────────────────────────
+SLOT=$(get_metadata "$CONTAINER" "slot")
+[[ -n "$SLOT" ]] || die "Could not determine slot for ${CONTAINER}. Was it started with sandbox-start?"
+
+if [[ -n "$HOST_PORT_OVERRIDE" ]]; then
+  [[ "$HOST_PORT_OVERRIDE" =~ ^[0-9]+$ ]] || die "Host port must be a number, got: $HOST_PORT_OVERRIDE"
+  HOST_PORT="$HOST_PORT_OVERRIDE"
+else
+  HOST_PORT=$(exposed_host_port "$PORT" "$SLOT")
+fi
+
+# Validate host port range
+(( HOST_PORT >= 1 && HOST_PORT <= 65535 )) \
+  || die "Computed host port ${HOST_PORT} is out of range (1-65535)"
+
+# Check for port conflicts
+proto_list=()
+case "$PROTO" in
+  tcp)  proto_list=(tcp) ;;
+  udp)  proto_list=(udp) ;;
+  both) proto_list=(tcp udp) ;;
+esac
+
+for p in "${proto_list[@]}"; do
+  conflict=$(check_port_conflict "$HOST_PORT" "$p" "$CONTAINER")
+  if [[ -n "$conflict" ]]; then
+    die "Host port ${HOST_PORT}/${p} is already in use by ${conflict}"
+  fi
+done
+
 # Get container IP for egress rules
 CONTAINER_IP=$(vm_exec "
   incus list ${CONTAINER} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
@@ -37,16 +98,16 @@ add_port() {
   local p="$1"
   local device_name="port-${PORT}-${p}"
 
-  # Inbound: host → container
+  # Inbound: host → container (listen on HOST_PORT, connect to container PORT)
   vm_exec "
     incus config device add '${CONTAINER}' '${device_name}' proxy \
-      'listen=${p}:0.0.0.0:${PORT}' \
+      'listen=${p}:0.0.0.0:${HOST_PORT}' \
       'connect=${p}:127.0.0.1:${PORT}'
   "
 
   # Outbound: container → external
   vm_exec "
-    iptables -I FORWARD -s '${CONTAINER_IP}' -o '${OUTBOUND_IFACE}' -p ${p} --dport ${PORT} -j ACCEPT
+    sudo iptables -I FORWARD -s '${CONTAINER_IP}' -o '${OUTBOUND_IFACE}' -p ${p} --dport ${PORT} -j ACCEPT
   "
 }
 
@@ -56,4 +117,8 @@ case "$PROTO" in
   both) add_port tcp; add_port udp ;;
 esac
 
-ok "Exposed ${CONTAINER}:${PORT} bidirectionally (${PROTO})"
+if [[ "$HOST_PORT" != "$PORT" ]]; then
+  ok "Exposed host:${HOST_PORT} → ${CONTAINER}:${PORT} bidirectionally (${PROTO})"
+else
+  ok "Exposed ${CONTAINER}:${PORT} bidirectionally (${PROTO})"
+fi
