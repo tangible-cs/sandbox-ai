@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # stacks/unison.sh — Unison toolchain (UCM with built-in LSP + MCP)
 # Runs INSIDE container after base.sh
-set -e
+set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 echo "Installing Unison stack..."
@@ -9,7 +9,7 @@ echo "Installing Unison stack..."
 # Unison Codebase Manager (UCM) via official Debian/Ubuntu apt repo
 curl -fsSL https://debian.unison-lang.org/public.gpg \
   | gpg --dearmor -o /etc/apt/trusted.gpg.d/unison-computing.gpg
-echo 'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/unison-computing.gpg] https://debian.unison-lang.org/ trixie main' \
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/trusted.gpg.d/unison-computing.gpg] https://debian.unison-lang.org/ trixie main" \
   > /etc/apt/sources.list.d/unison-computing.list
 apt-get update
 apt-get install -y unisonweb

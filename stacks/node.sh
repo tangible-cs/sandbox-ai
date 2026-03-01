@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # stacks/node.sh — Node.js alt package managers + quality/coverage tools
 # Runs INSIDE container after base.sh (installs Node.js + npm, then tools)
-set -e
+set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
+
+echo "Installing Node stack..."
 
 # Node.js 22 LTS (via NodeSource) — moved here from base.sh
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt-get install -y nodejs
-
-echo "Installing Node stack..."
+apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Alt package managers
 npm install -g pnpm yarn

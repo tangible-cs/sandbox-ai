@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # stacks/dotnet.sh — .NET SDK + quality/coverage tools
 # Runs INSIDE container after base.sh
-set -e
+set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 echo "Installing .NET stack..."
 
 # .NET SDK (latest LTS) via Microsoft package repo
-curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o /tmp/packages-microsoft-prod.deb
+curl -fsSL "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb" -o /tmp/packages-microsoft-prod.deb
 dpkg -i /tmp/packages-microsoft-prod.deb
 rm /tmp/packages-microsoft-prod.deb
 apt-get update
 apt-get install -y dotnet-sdk-8.0
+apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Coverage tool (installed as ubuntu)
 su - ubuntu -c 'dotnet tool install --global dotnet-coverage'

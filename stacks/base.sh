@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # stacks/base.sh — Core golden image: Docker, Claude Code, Python 3, dev tools
 # Usage: called by sandbox-setup, runs INSIDE the Incus container via incus exec
-set -e
+set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 echo "Installing base tools..."

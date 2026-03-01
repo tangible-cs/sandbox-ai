@@ -9,14 +9,11 @@ SANDBOX_MACHINE="sandbox"
 SANDBOX_KEY_DIR="${HOME}/.sandbox/keys"
 SANDBOX_ENV_FILE="${HOME}/.sandbox/env"
 WORKSPACE_DIR="/workspace/project"
-SANDBOX_USER="ubuntu"
 SANDBOX_UID=1000
 SANDBOX_GID=1000
 SANDBOX_USER_HOME="/home/ubuntu"
-SANDBOX_DOMAINS_DIR="${SCRIPT_DIR}/../domains"
-SANDBOX_DEFAULT_DOMAINS="${SANDBOX_DOMAINS_DIR}/anthropic-default.txt"
+SANDBOX_DEFAULT_DOMAINS="${SCRIPT_DIR}/../domains/anthropic-default.txt"
 SANDBOX_USER_DOMAINS="${HOME}/.sandbox/allowed-domains.txt"
-SQUID_CONF_DIR="/etc/squid/sandbox"
 SQUID_PORT=3129
 
 # ── Platform detection ────────────────────────────────────────────
