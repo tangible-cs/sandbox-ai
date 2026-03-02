@@ -258,7 +258,7 @@ sandbox-start <name> [repo-url] [flags]
 | Flag | Description | Default |
 |---|---|---|
 | `--stack <name>` | Golden image to use | `base` |
-| `--branch <name>` | Git branch to checkout after cloning | Repo default branch |
+| `--branch <name>` | Git branch to checkout after cloning (created if it doesn't exist) | Repo default branch |
 | `--from <name>` | Copy repo URL and stack from an existing container | -- |
 | `--ssh-key <path>` | Use a specific SSH key instead of auto-generating a deploy key | Auto-generate |
 | `--slot <n>` | Force a specific port slot (1-99) | Auto-assign |
