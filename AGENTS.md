@@ -21,6 +21,7 @@ Tests use BATS plus `bats-support` and `bats-assert`, cloned into `tests/test_he
 
 ## Commit & Pull Request Guidelines
 Recent history uses conventional prefixes with imperative summaries: `feat:`, `fix:`, `test:`, `docs:`. Keep that format, for example `fix: preserve domains file on restart`. PRs should describe the user-visible change, list commands run for validation, and call out platform scope (`macOS`, `Linux`, or both). For CLI or setup changes, include example commands or output snippets instead of screenshots.
+When working in this repository, commit changes as you go: make one commit per completed task instead of leaving large batches uncommitted. At the end of a run of work, push the completed commits to `origin`.
 
 ## Configuration & Security Notes
 Never commit real credentials. Use `env.example` as the template for `~/.sandbox/env`, and treat `domains/anthropic-default.txt` changes as security-sensitive because they affect egress policy.
