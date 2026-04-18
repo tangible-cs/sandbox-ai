@@ -236,9 +236,13 @@ build_golden() {
 
   # Run the stack script inside the container
   info "Running ${stack}.sh inside ${golden_name}..."
-  vm_run bash -c "
-    cat | incus exec ${golden_name} -- bash
-  " < "$stack_script"
+  {
+    cat "${STACKS_DIR}/integrity.sh"
+    echo
+    cat "${STACKS_DIR}/integrity-manifest.sh"
+    echo
+    cat "$stack_script"
+  } | vm_run incus exec "${golden_name}" -- bash
 
   # Stop and snapshot
   vm_exec "incus stop ${golden_name}"

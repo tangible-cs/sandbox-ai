@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# stacks/base.sh — Core golden image: Docker, Claude Code, Python 3, dev tools
+# stacks/base.sh — Core golden image: Docker, Node.js, Claude Code, Python 3, dev tools
 # Usage: called by sandbox-setup, runs INSIDE the Incus container via incus exec
 set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -29,10 +29,11 @@ fi
 echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu
 chmod 440 /etc/sudoers.d/ubuntu
 
-# Claude Code (installed as ubuntu — credentials live under /home/ubuntu)
-su - ubuntu -c 'curl -fsSL https://claude.ai/install.sh | bash'
-# Ensure claude is on PATH for non-interactive shells (incus exec)
-ln -sf /home/ubuntu/.local/bin/claude /usr/local/bin/claude
+# Node.js runtime is required for the pinned npm-based Claude Code install.
+install_node_runtime
+
+# Claude Code (installed globally; credentials still live under /home/ubuntu when launched as ubuntu)
+npm_install_global_verified "@anthropic-ai/claude-code" "${CLAUDE_CODE_VERSION}" "${CLAUDE_CODE_NPM_INTEGRITY}"
 
 # SSH config — key-based auth only (host key injected by sandbox-start)
 mkdir -p /run/sshd /root/.ssh /home/ubuntu/.ssh

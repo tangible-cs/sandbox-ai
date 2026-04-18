@@ -12,9 +12,9 @@ apt-get install -y pkg-config libssl-dev
 apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Rust toolchain (stable, installed as ubuntu) — installs rustc, cargo, clippy, rustfmt
-su - ubuntu -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
+install_rustup_verified
 
 # Coverage + security auditing
-su - ubuntu -c 'source $HOME/.cargo/env && cargo install cargo-tarpaulin cargo-audit'
+su - ubuntu -c "source \$HOME/.cargo/env && cargo install cargo-tarpaulin --version ${CARGO_TARPAULIN_VERSION} && cargo install cargo-audit --version ${CARGO_AUDIT_VERSION}"
 
 echo "Rust stack complete"

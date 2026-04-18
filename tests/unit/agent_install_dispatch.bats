@@ -42,7 +42,7 @@ teardown() {
   assert_output --partial "agent-test|root|npm install -g @openai/codex"
 }
 
-@test "install_agent_cli: runs claude installer as ubuntu and links the binary" {
+@test "install_agent_cli: runs the pinned claude npm install as root" {
   container_has_agent_cli() { return 1; }
   validate_agent_cli_installation() { return 0; }
 
@@ -51,6 +51,5 @@ teardown() {
 
   run cat "${EXEC_LOG}"
   assert_success
-  assert_output --partial "agent-test|ubuntu|curl -fsSL https://claude.ai/install.sh | bash"
-  assert_output --partial "agent-test|root|ln -sf /home/ubuntu/.local/bin/claude /usr/local/bin/claude"
+  assert_output --partial "agent-test|root|ACTUAL_INTEGRITY=\$(npm view @anthropic-ai/claude-code@2.1.114 dist.integrity)"
 }
