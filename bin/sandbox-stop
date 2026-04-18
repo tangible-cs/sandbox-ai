@@ -4,8 +4,51 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
-NAME="${1:?Usage: sandbox-stop <name> [--rm]}"
-REMOVE="${2:-}"
+print_help() {
+  cat <<'EOF'
+Purpose:
+  Stop a sandbox container and optionally remove it completely.
+
+Usage:
+  sandbox-stop <name> [--rm]
+
+Flags:
+  --rm         Delete the sandbox after stopping it and clean up deploy keys.
+  -h, --help   Show this help text.
+
+Defaults:
+  Without --rm, the sandbox is only stopped and can be restarted later.
+
+Examples:
+  sandbox-stop proj-alpha
+  sandbox-stop proj-alpha --rm
+EOF
+}
+
+NAME=""
+REMOVE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) print_help; exit 0 ;;
+    --rm) REMOVE="--rm"; shift ;;
+    --*) die "Unknown flag: $1
+Try 'sandbox-stop --help' for usage." ;;
+    *)
+      if [[ -z "$NAME" ]]; then
+        NAME="$1"
+        shift
+      else
+        die "Unexpected argument: $1
+Try 'sandbox-stop --help' for usage."
+      fi
+      ;;
+  esac
+done
+
+[[ -n "$NAME" ]] || die "Sandbox name required.
+Try 'sandbox-stop --help' for usage."
+
 CONTAINER=$(container_name "$NAME")
 
 require_vm

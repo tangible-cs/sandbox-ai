@@ -10,7 +10,7 @@ apt-get update
 apt-get install -y \
   curl git tmux openssh-server ripgrep jq htop wget unzip \
   build-essential ca-certificates gnupg lsb-release \
-  python3 python3-pip python3-venv
+  python3 python3-pip python3-venv bubblewrap
 
 # Docker (official repo)
 install -m 0755 -d /etc/apt/keyrings

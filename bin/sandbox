@@ -12,6 +12,32 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+print_help() {
+  cat <<'EOF'
+Purpose:
+  Open a shell, run an agent CLI, or execute a command inside one or more
+  running sandboxes. Multiple sandboxes open in a tmux session automatically.
+
+Usage:
+  sandbox <name> [name2 ...] [--agent <name>] [--cmd "<command>"] [--claude]
+
+Flags:
+  --agent <name>   Run the selected agent CLI instead of an interactive shell.
+  --cmd "<cmd>"    Run the command inside each target container.
+  --claude         Backward-compatible alias for --agent claude.
+  -h, --help       Show this help text.
+
+Defaults:
+  With no mode flag, sandbox opens an interactive shell.
+
+Examples:
+  sandbox proj-alpha
+  sandbox proj-alpha --agent codex
+  sandbox proj-alpha proj-beta --agent codex
+  sandbox proj-alpha --cmd "git status"
+EOF
+}
+
 # ── Parse args ──────────────────────────────────────────────────────
 NAMES=()
 MODE="shell"   # shell | agent | cmd
@@ -20,15 +46,18 @@ REQUESTED_AGENT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h|--help) print_help; exit 0 ;;
     --claude) MODE="agent"; REQUESTED_AGENT="claude"; shift ;;
     --agent)  [[ -n "${2:-}" ]] || die "--agent requires a value"; MODE="agent"; REQUESTED_AGENT="$2"; shift 2 ;;
     --cmd)    [[ -n "${2:-}" ]] || die "--cmd requires a value"; MODE="cmd"; CMD="$2"; shift 2 ;;
-    --*)      die "Unknown flag: $1" ;;
+    --*)      die "Unknown flag: $1
+Try 'sandbox --help' for usage." ;;
     *)        NAMES+=("$1"); shift ;;
   esac
 done
 
-[[ ${#NAMES[@]} -gt 0 ]] || die "Usage: sandbox <name> [name2...] [--agent <name>] [--cmd \"command\"] [--claude]"
+[[ ${#NAMES[@]} -gt 0 ]] || die "Container name required.
+Try 'sandbox --help' for usage."
 
 require_sandbox
 

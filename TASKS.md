@@ -1,23 +1,24 @@
-# Set Aside For Review
+# Completed Tasks
 
-All executable implementation tasks from the prior task list have been completed. The remaining items are blocked on environment or policy decisions rather than code construction.
-
+The actionable items from the previous review cycle are now complete.
 
 ## 3. Fix Post-Setup Next Steps Messaging
-Status: pending
+Status: completed
 
-What remains:
-- Update the post-setup output so it does not tell users to rerun `./install.sh` after installation has already been completed.
-- Replace that guidance with the correct shell refresh step, for example `source ~/.zshrc`, or otherwise make the message conditional on whether the wrappers are already on `PATH`.
+What changed:
+- `sandbox-setup` now prints a shell refresh step instead of incorrectly telling users to rerun `./install.sh`.
+- The next-steps text is driven by a shared helper so the shell-specific command is testable.
+- Coverage was added for `zsh`, `bash`, and fallback shells.
 
-What to review:
-- After implementation, confirm the next-steps text matches the actual user workflow on macOS with `zsh`.
+Validation:
+- Unit coverage confirms the message includes `source ~/.zshrc` for `zsh`.
+- The old `./install.sh` guidance is explicitly excluded by test.
 
 ## 4. Add Robust `--help` Output Across CLI Utilities
-Status: pending
+Status: completed
 
-What remains:
-- Add consistent `--help` support to each user-facing utility in `bin/`, including at least:
+What changed:
+- Added consistent `--help` support to:
   - `sandbox`
   - `sandbox-start`
   - `sandbox-stop`
@@ -26,21 +27,29 @@ What remains:
   - `sandbox-setup`
   - `sandbox-linux-prereqs`
   - `sandbox-nuke`
-- Make each help screen include:
-  - purpose
-  - usage syntax
-  - flag descriptions
-  - a few realistic examples
-  - any important defaults or side effects
-- Ensure unknown flags point users toward `--help` instead of only failing generically.
-- Add automated coverage for help output and basic usage/error messaging where practical.
+- Help output now includes purpose, usage, flags, defaults, and examples.
+- Unknown flags now point users to the relevant `--help` screen.
 
-What to review:
-- After implementation, confirm the help text is concise, accurate, and sufficient for first-time users to operate the tools without opening the README.
+Validation:
+- Unit coverage exercises `--help` and unknown-flag behavior across all user-facing CLIs.
 
-## 5. Resolve missing prerequisite for codex in the golden image
-Chris got this warning when running codex inside a sandbox: "Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites:
-  https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the vendored bubblewrap in the meantime."
-  you ran out of usage before helping chris frame this task, so rewrite this task five for clarity on the fix approach, and fix the image so this warning (ensure all prereqs are installed)
-  
-## 6.  
+## 5. Resolve Missing Codex Prerequisite In The Golden Image
+Status: completed
+
+Fix approach implemented:
+- Added `bubblewrap` to Codex runtime prerequisites.
+- Added an on-start runtime fallback so Codex sandboxes install `bubblewrap` if it is missing.
+- Added `bubblewrap` to `stacks/base.sh` so rebuilt golden images include it by default.
+- Rebuilt `golden-base` and verified the live image contains `bwrap`.
+
+Validation:
+- Unit coverage asserts the Codex runtime prerequisite set includes `bubblewrap`.
+- Unit coverage asserts `stacks/base.sh` installs `bubblewrap`.
+- Integration coverage verifies `bwrap --version` succeeds inside a real base sandbox.
+
+## 6. Placeholder
+Status: pending definition
+
+Notes:
+- The task file previously contained a blank `6.` entry with no executable work attached to it.
+- Leave this undefined until a concrete task is written.

@@ -3,6 +3,35 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+print_help() {
+  cat <<'EOF'
+Purpose:
+  List all sandbox containers with health details, default agent metadata, and
+  repository status.
+
+Usage:
+  sandbox-list
+
+Flags:
+  -h, --help   Show this help text.
+
+Defaults:
+  Running containers include health checks for Docker, SSH agent state, and
+  per-agent authentication. Stopped containers show metadata only.
+
+Examples:
+  sandbox-list
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) print_help; exit 0 ;;
+    *) die "Unknown flag: $1
+Try 'sandbox-list --help' for usage." ;;
+  esac
+done
+
 require_sandbox
 
 CONTAINERS=$(vm_exec "incus list -f csv -c n 2>/dev/null | grep '^agent-' || true")

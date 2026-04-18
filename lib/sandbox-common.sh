@@ -54,6 +54,25 @@ warn()  { echo -e "${YELLOW}${BOLD}[sandbox]${NC} $*" >&2; }
 err()   { echo -e "${RED}${BOLD}[sandbox]${NC} $*" >&2; }
 die()   { err "$@"; exit 1; }
 
+setup_shell_refresh_command() {
+  case "${SHELL##*/}" in
+    zsh) echo "source ~/.zshrc" ;;
+    bash) echo "source ~/.bashrc" ;;
+    *) echo 'exec $SHELL -l' ;;
+  esac
+}
+
+setup_next_steps_message() {
+  local first_sandbox_command="${1:-sandbox-start my-project git@github.com:you/repo.git --stack base}"
+  cat <<EOF
+Next steps:
+  1. Refresh your shell so installed wrapper scripts are available:
+     $(setup_shell_refresh_command)
+  2. Create your first sandbox:
+     ${first_sandbox_command}
+EOF
+}
+
 # ── Prerequisite checks ────────────────────────────────────────────
 require_command() {
   command -v "$1" &>/dev/null || die "'$1' is required but not found. Install it first."
@@ -315,6 +334,16 @@ ensure_container_node_runtime() {
   container_exec_shell "$container" "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs && apt-get clean && rm -rf /var/lib/apt/lists/*"
 }
 
+ensure_container_bubblewrap_runtime() {
+  local container="$1"
+  if container_command_exists "$container" "bwrap"; then
+    return 0
+  fi
+
+  info "Installing bubblewrap runtime in ${container}..."
+  container_exec_shell "$container" "apt-get update && apt-get install -y bubblewrap && apt-get clean && rm -rf /var/lib/apt/lists/*"
+}
+
 ensure_container_agent_runtime_prereqs() {
   local container="$1"
   shift
@@ -324,6 +353,7 @@ ensure_container_agent_runtime_prereqs() {
   while IFS= read -r prereq; do
     case "$prereq" in
       node|npm) ensure_container_node_runtime "$container" ;;
+      bubblewrap|bwrap) ensure_container_bubblewrap_runtime "$container" ;;
       python|"") ;;
       *) warn "Unknown runtime prerequisite '${prereq}' requested by agent config; skipping" ;;
     esac

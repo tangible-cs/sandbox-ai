@@ -7,6 +7,35 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+print_help() {
+  cat <<'EOF'
+Purpose:
+  Install the Linux packages and group membership required before running
+  sandbox-setup on a native Linux host.
+
+Usage:
+  sudo sandbox-linux-prereqs
+
+Flags:
+  -h, --help   Show this help text.
+
+Defaults:
+  The script is idempotent and safe to rerun.
+  It may require logging out and back in if incus-admin membership changes.
+
+Examples:
+  sudo sandbox-linux-prereqs
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) print_help; exit 0 ;;
+    *) die "Unknown flag: $1
+Try 'sandbox-linux-prereqs --help' for usage." ;;
+  esac
+done
+
 # ── Platform guard ────────────────────────────────────────────────
 if [[ "$SANDBOX_PLATFORM" != "linux" ]]; then
   die "This script is for Linux only (detected: ${SANDBOX_PLATFORM})"

@@ -4,6 +4,34 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+print_help() {
+  cat <<'EOF'
+Purpose:
+  Destroy every sandbox container, every golden image, and local deploy-key
+  material. On macOS it also deletes the OrbStack sandbox VM.
+
+Usage:
+  sandbox-nuke
+
+Flags:
+  -h, --help   Show this help text.
+
+Defaults:
+  The command is destructive and always prompts for confirmation.
+
+Examples:
+  sandbox-nuke
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) print_help; exit 0 ;;
+    *) die "Unknown flag: $1
+Try 'sandbox-nuke --help' for usage." ;;
+  esac
+done
+
 require_sandbox
 
 echo "This will destroy ALL agent containers, golden images, and deploy keys."

@@ -7,11 +7,37 @@ source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 STACKS_DIR="${SCRIPT_DIR}/../stacks"
 REBUILD_STACK=""
 
+print_help() {
+  cat <<'EOF'
+Purpose:
+  Prepare the sandbox host or OrbStack VM, install Incus and Squid, and build
+  the golden images used by sandbox-start.
+
+Usage:
+  sandbox-setup [--rebuild <stack>]
+
+Flags:
+  --rebuild <stack>  Rebuild one stack or all stacks (use all).
+  -h, --help         Show this help text.
+
+Defaults:
+  Without --rebuild, existing ready snapshots are reused.
+  Running this command is idempotent for host setup steps.
+
+Examples:
+  sandbox-setup
+  sandbox-setup --rebuild base
+  sandbox-setup --rebuild all
+EOF
+}
+
 # ── Parse args ──────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --rebuild) REBUILD_STACK="$2"; shift 2 ;;
-    *) die "Unknown argument: $1" ;;
+    -h|--help) print_help; exit 0 ;;
+    --rebuild) [[ -n "${2:-}" ]] || die "--rebuild requires a value"; REBUILD_STACK="$2"; shift 2 ;;
+    *) die "Unknown flag: $1
+Try 'sandbox-setup --help' for usage." ;;
   esac
 done
 
@@ -233,7 +259,4 @@ done
 echo ""
 ok "=== Setup complete ==="
 echo ""
-echo "Next steps:"
-echo "  1. Ensure scripts are in PATH: run ./install.sh"
-echo "  2. Create your first sandbox:"
-echo "     sandbox-start my-project git@github.com:you/repo.git --stack base"
+setup_next_steps_message

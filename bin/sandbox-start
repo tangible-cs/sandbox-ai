@@ -4,6 +4,42 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
+print_help() {
+  cat <<'EOF'
+Purpose:
+  Create a new sandbox from a golden image or restart an existing stopped one.
+
+Usage:
+  sandbox-start <name> [repo-url] [flags]
+
+Flags:
+  --stack <name>          Golden image stack to use. Default: base.
+  --branch <name>         Branch to check out after cloning the repo.
+  --from <name>           Inherit repo and selected settings from another sandbox.
+  --ssh-key <path>        Use an existing private key instead of generating one.
+  --slot <N>              Reserve a specific slot instead of auto-assigning one.
+  --cpu <N>               Apply an Incus CPU limit.
+  --memory <value>        Apply an Incus memory limit, for example 8GiB.
+  --env KEY=VALUE         Inject an environment variable. Repeatable.
+  --agent <name>          Install an agent CLI in the sandbox. Repeatable.
+  --default-agent <name>  Set the default agent CLI for sandbox <name>.
+  --restrict-domains      Restrict HTTPS egress to the merged allowlist.
+  --domains-file <path>   Add domains from a custom allowlist file.
+  -h, --help              Show this help text.
+
+Defaults:
+  The default stack is base.
+  If no --agent flags are given, sandbox-start installs Codex and sets it as
+  the default agent.
+
+Examples:
+  sandbox-start proj-alpha git@github.com:me/repo.git
+  sandbox-start proj-alpha git@github.com:me/repo.git --stack rust --agent codex
+  sandbox-start proj-multi git@github.com:me/repo.git --agent claude --agent codex --default-agent codex
+  sandbox-start proj-safe --restrict-domains --domains-file ./domains.txt
+EOF
+}
+
 # ── Parse args ──────────────────────────────────────────────────────
 NAME=""
 REPO=""
@@ -78,6 +114,7 @@ print_connection_summary() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h|--help)           print_help; exit 0 ;;
     --stack)            [[ -n "${2:-}" ]] || die "--stack requires a value"; STACK="$2"; shift 2 ;;
     --branch)           [[ -n "${2:-}" ]] || die "--branch requires a value"; BRANCH="$2"; shift 2 ;;
     --from)             [[ -n "${2:-}" ]] || die "--from requires a value"; FROM="$2"; shift 2 ;;
@@ -90,7 +127,8 @@ while [[ $# -gt 0 ]]; do
     --default-agent)    [[ -n "${2:-}" ]] || die "--default-agent requires a value"; DEFAULT_AGENT="$2"; shift 2 ;;
     --restrict-domains) RESTRICT_DOMAINS="yes"; shift ;;
     --domains-file)     [[ -n "${2:-}" ]] || die "--domains-file requires a value"; RESTRICT_DOMAINS="yes"; DOMAINS_FILE="$2"; shift 2 ;;
-    --*)                die "Unknown flag: $1" ;;
+    --*)                die "Unknown flag: $1
+Try 'sandbox-start --help' for usage." ;;
     *)
       if [[ -z "$NAME" ]]; then
         NAME="$1"
@@ -104,7 +142,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$NAME" ]] || die "Usage: sandbox-start <name> [repo-url] [flags]"
+[[ -n "$NAME" ]] || die "Sandbox name required.
+Try 'sandbox-start --help' for usage."
 
 if [[ ${#AGENT_IDS[@]} -gt 0 ]]; then
   SELECTED_AGENTS_CSV=$(resolve_selected_agents "${AGENT_IDS[@]}")

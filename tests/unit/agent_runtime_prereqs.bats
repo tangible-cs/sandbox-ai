@@ -22,19 +22,19 @@ teardown() {
   assert_output ""
 }
 
-@test "runtime_prereqs_for_agents: codex requires node" {
+@test "runtime_prereqs_for_agents: codex requires node and bubblewrap" {
   run runtime_prereqs_for_agents "codex"
   assert_success
-  assert_output "node"
+  assert_output "node,bubblewrap"
 }
 
 @test "runtime_prereqs_for_agents: deduplicates shared runtime requirements" {
   run runtime_prereqs_for_agents "codex" "claude" "codex"
   assert_success
-  assert_output "node"
+  assert_output "node,bubblewrap"
 }
 
-@test "ensure_container_agent_runtime_prereqs: installs node when required and missing" {
+@test "ensure_container_agent_runtime_prereqs: installs node and bubblewrap when required and missing" {
   container_command_exists() { return 1; }
 
   run ensure_container_agent_runtime_prereqs "agent-test" "codex"
@@ -43,6 +43,7 @@ teardown() {
   run cat "${VM_EXEC_LOG}"
   assert_success
   assert_output --partial "apt-get install -y nodejs"
+  assert_output --partial "apt-get install -y bubblewrap"
 }
 
 @test "ensure_container_agent_runtime_prereqs: does nothing when node is already present" {
