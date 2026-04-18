@@ -145,6 +145,10 @@ done
 [[ -n "$NAME" ]] || die "Sandbox name required.
 Try 'sandbox-start --help' for usage."
 
+validate_stack "$STACK"
+[[ -n "$CPU" ]] && validate_cpu "$CPU"
+[[ -n "$MEMORY" ]] && validate_memory "$MEMORY"
+
 if [[ ${#AGENT_IDS[@]} -gt 0 ]]; then
   SELECTED_AGENTS_CSV=$(resolve_selected_agents "${AGENT_IDS[@]}")
 else

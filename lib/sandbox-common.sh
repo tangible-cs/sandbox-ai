@@ -644,6 +644,18 @@ validate_slot() {
   fi
 }
 
+validate_cpu() {
+  [[ "$1" =~ ^[0-9]+$ ]] || die "Invalid CPU value: $1"
+}
+
+validate_memory() {
+  [[ "$1" =~ ^[0-9]+(MiB|GiB|MB|GB)$ ]] || die "Invalid memory value: $1"
+}
+
+validate_stack() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "Invalid stack name: $1"
+}
+
 # ── Deploy key management ──────────────────────────────────────────
 # Extracts org/repo from a git URL (SSH or HTTPS)
 # e.g., git@github.com:me/alpha.git -> me/alpha
