@@ -157,14 +157,116 @@ list_agent_ids() {
   done | sort
 }
 
-validate_cli_config_file() {
+cli_config_allowed_fields() {
+  cat <<'EOF'
+CLI_ID
+CLI_DISPLAY_NAME
+CLI_BINARY_NAME
+CLI_INSTALL_STRATEGY
+CLI_INSTALL_REF
+CLI_INSTALL_COMMAND
+CLI_INSTALL_USER
+CLI_UPDATE_COMMAND
+CLI_UNINSTALL_COMMAND
+CLI_LAUNCH_COMMAND
+CLI_HEADLESS_COMMAND
+CLI_VERSION_CHECK_COMMAND
+CLI_POST_INSTALL_VALIDATION_COMMAND
+CLI_AUTH_STRATEGY
+CLI_AUTH_COMMAND
+CLI_AUTH_CHECK_COMMAND
+CLI_CREDENTIAL_PATHS
+CLI_REQUIRED_ENV_VARS
+CLI_OPTIONAL_ENV_VARS
+CLI_SUPPORTS_CHATGPT_SUBSCRIPTION_LOGIN
+CLI_SUPPORTS_BROWSER_LOGIN
+CLI_REQUIRES_NODE
+CLI_REQUIRES_PYTHON
+CLI_REQUIRES_UV_OR_PIPX
+CLI_RUNTIME_PREREQS
+CLI_CACHE_STRATEGY
+CLI_CACHE_KEY
+CLI_ALLOWLIST_FILE
+CLI_SESSION_HOME_SUBDIR
+CLI_STATUS_LABEL
+CLI_PATH_LINK_SOURCE
+CLI_PATH_LINK_TARGET
+CLI_DEFAULT_FLAGS
+CLI_NOTES
+EOF
+}
+
+cli_config_migration_hint() {
+  cat <<'EOF'
+Update the file to plain KEY="VALUE" lines only. Remove shell syntax, unknown keys, and variable expansions.
+For repo files such as CLI_ALLOWLIST_FILE, use a repo-relative path like "domains/openai-default.txt".
+EOF
+}
+
+is_allowed_cli_config_field() {
+  local field="${1:-}"
+  cli_config_allowed_fields | grep -qx "$field"
+}
+
+set_cli_config_var() {
+  local field="${1:-}" value="${2:-}"
+  case "$field" in
+    CLI_ID|CLI_DISPLAY_NAME|CLI_BINARY_NAME|CLI_INSTALL_STRATEGY|CLI_INSTALL_REF|CLI_INSTALL_COMMAND|CLI_INSTALL_USER|CLI_UPDATE_COMMAND|CLI_UNINSTALL_COMMAND|CLI_LAUNCH_COMMAND|CLI_HEADLESS_COMMAND|CLI_VERSION_CHECK_COMMAND|CLI_POST_INSTALL_VALIDATION_COMMAND|CLI_AUTH_STRATEGY|CLI_AUTH_COMMAND|CLI_AUTH_CHECK_COMMAND|CLI_CREDENTIAL_PATHS|CLI_REQUIRED_ENV_VARS|CLI_OPTIONAL_ENV_VARS|CLI_SUPPORTS_CHATGPT_SUBSCRIPTION_LOGIN|CLI_SUPPORTS_BROWSER_LOGIN|CLI_REQUIRES_NODE|CLI_REQUIRES_PYTHON|CLI_REQUIRES_UV_OR_PIPX|CLI_RUNTIME_PREREQS|CLI_CACHE_STRATEGY|CLI_CACHE_KEY|CLI_ALLOWLIST_FILE|CLI_SESSION_HOME_SUBDIR|CLI_STATUS_LABEL|CLI_PATH_LINK_SOURCE|CLI_PATH_LINK_TARGET|CLI_DEFAULT_FLAGS|CLI_NOTES)
+      printf -v "$field" '%s' "$value"
+      ;;
+    *)
+      die "Unsupported agent config field '${field}'"
+      ;;
+  esac
+}
+
+resolve_cli_config_path_value() {
+  local value="${1:-}"
+  [[ -n "$value" ]] || return 0
+  if [[ "$value" == /* ]]; then
+    echo "$value"
+  else
+    echo "${SANDBOX_ROOT}/${value}"
+  fi
+}
+
+parse_cli_config_file() {
   local config_path="${1:-}"
   [[ -n "$config_path" ]] || die "Config path is required"
   [[ -f "$config_path" ]] || die "Agent config not found: ${config_path}"
 
   clear_cli_config_vars
-  # shellcheck disable=SC1090
-  source "$config_path"
+
+  local line line_number=0 field value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_number=$((line_number + 1))
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ ! "$line" =~ ^([A-Z0-9_]+)=\"(.*)\"$ ]]; then
+      die "Agent config '${config_path}' has invalid line ${line_number}: ${line}
+$(cli_config_migration_hint)"
+    fi
+
+    field="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    is_allowed_cli_config_field "$field" \
+      || die "Agent config '${config_path}' contains unknown field '${field}' on line ${line_number}.
+$(cli_config_migration_hint)"
+    set_cli_config_var "$field" "$value"
+  done < "$config_path"
+
+  if [[ -n "${CLI_ALLOWLIST_FILE:-}" ]]; then
+    CLI_ALLOWLIST_FILE=$(resolve_cli_config_path_value "$CLI_ALLOWLIST_FILE")
+  fi
+}
+
+validate_cli_config_file() {
+  local config_path="${1:-}"
+  [[ -n "$config_path" ]] || die "Config path is required"
+  [[ -f "$config_path" ]] || die "Agent config not found: ${config_path}"
+
+  parse_cli_config_file "$config_path"
 
   local required_nonempty=(
     CLI_ID CLI_DISPLAY_NAME CLI_BINARY_NAME CLI_INSTALL_STRATEGY
@@ -195,9 +297,7 @@ load_cli_config() {
   local config_path
   config_path=$(cli_config_path "$agent_id")
   validate_cli_config_file "$config_path" >/dev/null
-  clear_cli_config_vars
-  # shellcheck disable=SC1090
-  source "$config_path"
+  parse_cli_config_file "$config_path"
 }
 
 # ── Agent metadata helpers ─────────────────────────────────────────
