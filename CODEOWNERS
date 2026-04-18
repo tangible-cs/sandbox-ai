@@ -1,0 +1,8 @@
+# Security-sensitive runtime, policy, and egress controls.
+/bin/ @socialtopher
+/lib/ @socialtopher
+/agents/ @socialtopher
+/domains/ @socialtopher
+/README.md @socialtopher
+/AGENTS.md @socialtopher
+

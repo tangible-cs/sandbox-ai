@@ -703,6 +703,12 @@ Or create a project-specific file and pass it with `--domains-file`.
 | **HTTPS traffic content** | Without `--restrict-domains`, egress filtering allows all HTTPS traffic — agents can reach any HTTPS endpoint. Use `--restrict-domains` to limit HTTPS egress to an approved domain allowlist (see [Domain-Based Egress Filtering](#domain-based-egress-filtering)). |
 | **Persistent container state** | Stopping a container preserves its filesystem. Anything the agent wrote remains until the container is destroyed with `--rm`. |
 
+### Security Ownership
+
+Security-sensitive paths in this repository are covered by [`CODEOWNERS`](./CODEOWNERS): `bin/`, `lib/`, `agents/`, `domains/`, `README.md`, and `AGENTS.md`.
+
+To enforce review ownership in GitHub, enable branch protection or a ruleset that requires review from code owners before merging pull requests that touch those paths.
+
 ## Troubleshooting
 
 ### Common Issues
