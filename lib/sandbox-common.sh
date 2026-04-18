@@ -107,15 +107,15 @@ require_gh() {
 require_golden() {
   local stack="${1:-base}"
   local golden_name="golden-${stack}"
-  vm_exec "incus info ${golden_name} &>/dev/null" \
+  vm_run incus info "${golden_name}" >/dev/null 2>&1 \
     || die "Golden image '${golden_name}' not found. Run 'sandbox-setup' first."
-  vm_exec "incus snapshot list ${golden_name} -f csv 2>/dev/null | grep -q ready" \
+  vm_run incus snapshot list "${golden_name}" -f csv 2>/dev/null | grep -q '^ready,' \
     || die "Golden image '${golden_name}' has no 'ready' snapshot. Run 'sandbox-setup' first."
 }
 
 require_container() {
   local container="$1"
-  vm_exec "incus info ${container} &>/dev/null" 2>/dev/null \
+  vm_run incus info "${container}" >/dev/null 2>&1 \
     || die "Container '${container}' not found"
 }
 
@@ -311,16 +311,20 @@ runtime_prereqs_for_agents() {
 
 container_command_exists() {
   local container="$1" command_name="$2"
-  vm_exec "incus exec ${container} -- bash -lc 'command -v ${command_name}'" >/dev/null 2>&1
+  vm_run incus exec "${container}" -- bash -lc 'command -v "$1"' _ "${command_name}" >/dev/null 2>&1
 }
 
 container_exec_shell() {
   local container="$1" command="$2" run_as="${3:-root}"
-  local escaped_command="${command//\'/\'\\\'\'}"
   if [[ "$run_as" == "ubuntu" ]]; then
-    vm_exec "incus exec ${container} --user ${SANDBOX_UID} --group ${SANDBOX_GID} --env HOME=${SANDBOX_USER_HOME} -- bash -lc '${escaped_command}'"
+    vm_run incus exec "${container}" \
+      --user "${SANDBOX_UID}" \
+      --group "${SANDBOX_GID}" \
+      --env "HOME=${SANDBOX_USER_HOME}" \
+      -- \
+      bash -lc "$command"
   else
-    vm_exec "incus exec ${container} -- bash -lc '${escaped_command}'"
+    vm_run incus exec "${container}" -- bash -lc "$command"
   fi
 }
 
@@ -553,6 +557,22 @@ vm_exec() {
   vm_run bash -c "$1"
 }
 
+list_sandbox_containers() {
+  vm_run incus list -f csv -c n 2>/dev/null | grep '^agent-' || true
+}
+
+container_status() {
+  local container="$1"
+  vm_run incus info "${container}" 2>/dev/null | awk '/^Status:/ {print $2; exit}'
+}
+
+device_proxy_port() {
+  local container="$1" device="$2"
+  vm_run incus config device get "${container}" "${device}" listen 2>/dev/null \
+    | grep -o '[0-9]*$' \
+    || true
+}
+
 # ── Container naming ───────────────────────────────────────────────
 container_name() {
   local name="$1"
@@ -567,7 +587,7 @@ container_name() {
 wait_for_container_networking() {
   local container="$1"
   local attempts=0
-  while ! vm_exec "incus exec ${container} -- ip addr show eth0 2>/dev/null | grep -q 'inet '" 2>/dev/null; do
+  while ! vm_run incus exec "${container}" -- ip -4 addr show eth0 2>/dev/null | grep -q 'inet '; do
     attempts=$((attempts + 1))
     if (( attempts > 30 )); then
       die "Timed out waiting for container networking"
@@ -586,7 +606,10 @@ exposed_host_port() { echo $(( $1 + $2 )); }
 # Get the IPv4 address of a container. Returns empty string if not found.
 get_container_ip() {
   local container="$1"
-  vm_exec "incus list ${container} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1" || true
+  vm_run incus list "${container}" -f csv -c 4 2>/dev/null \
+    | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' \
+    | head -1 \
+    || true
 }
 
 # Check if a host port is already in use by another container's proxy device.
@@ -594,30 +617,31 @@ get_container_ip() {
 # Usage: check_port_conflict <host_port> <protocol> <self_container>
 check_port_conflict() {
   local host_port="$1" proto="$2" self="$3"
-  vm_exec "
-    for c in \$(incus list -f csv -c n 2>/dev/null | grep '^agent-'); do
-      [ \"\$c\" = '${self}' ] && continue
-      for dev in \$(incus config device list \"\$c\" 2>/dev/null | grep '^port-' || true); do
-        listen=\$(incus config device get \"\$c\" \"\$dev\" listen 2>/dev/null || true)
-        if echo \"\$listen\" | grep -q '^${proto}:.*:${host_port}\$'; then
-          echo \"\$c\"
-          exit 0
-        fi
-      done
-    done
-  " 2>/dev/null || true
+  local c dev listen
+  while IFS= read -r c; do
+    [[ -n "$c" ]] || continue
+    [[ "$c" == "$self" ]] && continue
+    while IFS= read -r dev; do
+      [[ -n "$dev" ]] || continue
+      listen=$(vm_run incus config device get "$c" "$dev" listen 2>/dev/null || true)
+      if grep -q "^${proto}:.*:${host_port}\$" <<< "$listen"; then
+        echo "$c"
+        return 0
+      fi
+    done < <(vm_run incus config device list "$c" 2>/dev/null | grep '^port-' || true)
+  done < <(list_sandbox_containers)
 }
 
 # Returns list of currently used slots by querying ssh-proxy listen ports
 used_slots() {
-  vm_exec '
-    for c in $(incus list -f csv -c n 2>/dev/null | grep "^agent-"); do
-      port=$(incus config device get "$c" ssh-proxy listen 2>/dev/null | grep -o "[0-9]*$" || true)
-      if [ -n "$port" ]; then
-        echo $(( port - 2200 ))
-      fi
-    done
-  ' 2>/dev/null | sort -n
+  local c port
+  while IFS= read -r c; do
+    [[ -n "$c" ]] || continue
+    port=$(device_proxy_port "$c" "ssh-proxy")
+    if [[ -n "$port" ]]; then
+      echo $(( port - 2200 ))
+    fi
+  done < <(list_sandbox_containers)
 }
 
 next_free_slot() {

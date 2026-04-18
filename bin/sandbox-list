@@ -34,7 +34,7 @@ done
 
 require_sandbox
 
-CONTAINERS=$(vm_exec "incus list -f csv -c n 2>/dev/null | grep '^agent-' || true")
+CONTAINERS=$(list_sandbox_containers)
 
 if [[ -z "$CONTAINERS" ]]; then
   echo "No agent containers found"
@@ -47,11 +47,14 @@ printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-14s %-24s %s\n" \
   "─────────" "─────" "────" "───" "───" "───" "─────" "──────" "──────" "────────" "───────" "────" "────"
 
 for c in $CONTAINERS; do
-  state=$(vm_exec "incus info ${c} 2>/dev/null | grep 'Status:' | awk '{print \$2}'" || true)
+  state=$(container_status "$c" || true)
 
-  ssh_p=$(vm_exec "incus config device get ${c} ssh-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo '-'" || true)
-  app_p=$(vm_exec "incus config device get ${c} app-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo '-'" || true)
-  alt_p=$(vm_exec "incus config device get ${c} alt-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo '-'" || true)
+  ssh_p=$(device_proxy_port "$c" "ssh-proxy")
+  app_p=$(device_proxy_port "$c" "app-proxy")
+  alt_p=$(device_proxy_port "$c" "alt-proxy")
+  [[ -n "$ssh_p" ]] || ssh_p="-"
+  [[ -n "$app_p" ]] || app_p="-"
+  [[ -n "$alt_p" ]] || alt_p="-"
 
   if [[ "$ssh_p" != "-" ]]; then
     slot=$(( ssh_p - 2200 ))
@@ -62,8 +65,8 @@ for c in $CONTAINERS; do
   extras=""
   while IFS= read -r dev; do
     [[ -n "$dev" ]] || continue
-    listen_port=$(vm_exec "incus config device get ${c} ${dev} listen 2>/dev/null | grep -o '[0-9]*$' || true" || true)
-    connect_port=$(vm_exec "incus config device get ${c} ${dev} connect 2>/dev/null | grep -o '[0-9]*$' || true" || true)
+    listen_port=$(vm_run incus config device get "${c}" "${dev}" listen 2>/dev/null | grep -o '[0-9]*$' || true)
+    connect_port=$(vm_run incus config device get "${c}" "${dev}" connect 2>/dev/null | grep -o '[0-9]*$' || true)
     if [[ -n "$listen_port" ]]; then
       [[ -n "$extras" ]] && extras="${extras},"
       if [[ -n "$connect_port" && "$listen_port" != "$connect_port" ]]; then
@@ -72,7 +75,7 @@ for c in $CONTAINERS; do
         extras="${extras}${listen_port}"
       fi
     fi
-  done < <(vm_exec "incus config device list ${c} 2>/dev/null | grep '^port-' || true")
+  done < <(vm_run incus config device list "${c}" 2>/dev/null | grep '^port-' || true)
   [[ -n "$extras" ]] || extras="-"
 
   egress_status="open"
@@ -92,13 +95,13 @@ for c in $CONTAINERS; do
   auth_status="-"
 
   if [[ "$state" == "RUNNING" ]]; then
-    if vm_exec "incus exec ${c} -- docker info &>/dev/null"; then
+    if vm_run incus exec "${c}" -- docker info >/dev/null 2>&1; then
       docker_status="ok"
     else
       docker_status="err"
     fi
 
-    agent_out=$(vm_exec "incus exec ${c} -- bash -c 'SSH_AUTH_SOCK=/run/ssh-agent.sock ssh-add -l 2>&1' || true" || true)
+    agent_out=$(vm_run incus exec "${c}" -- env SSH_AUTH_SOCK=/run/ssh-agent.sock ssh-add -l 2>&1 || true)
     if echo "$agent_out" | grep -q "no identities"; then
       ssh_agent_status="no-key"
     elif echo "$agent_out" | grep -q "Could not open\|Error\|refused"; then
@@ -111,9 +114,9 @@ for c in $CONTAINERS; do
 
     auth_status=$(format_agent_auth_statuses "$c" "${installed_agents[@]}")
 
-    if vm_exec "incus exec ${c} -- test -d ${WORKSPACE_DIR}/.git 2>/dev/null"; then
-      remote=$(vm_exec "incus exec ${c} -- git -c safe.directory=${WORKSPACE_DIR} -C ${WORKSPACE_DIR} remote get-url origin 2>/dev/null | sed -E 's#.*github\\.com[:/]##; s#\\.git\$##' || echo '?'" || true)
-      branch=$(vm_exec "incus exec ${c} -- git -c safe.directory=${WORKSPACE_DIR} -C ${WORKSPACE_DIR} branch --show-current 2>/dev/null || echo '?'" || true)
+    if vm_run incus exec "${c}" -- test -d "${WORKSPACE_DIR}/.git" 2>/dev/null; then
+      remote=$(vm_run incus exec "${c}" -- git -c "safe.directory=${WORKSPACE_DIR}" -C "${WORKSPACE_DIR}" remote get-url origin 2>/dev/null | sed -E 's#.*github\.com[:/]##; s#\.git$##' || echo '?')
+      branch=$(vm_run incus exec "${c}" -- git -c "safe.directory=${WORKSPACE_DIR}" -C "${WORKSPACE_DIR}" branch --show-current 2>/dev/null || echo '?')
       repo_info="${remote} (${branch})"
     fi
   fi

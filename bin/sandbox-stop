@@ -72,13 +72,13 @@ if [[ -n "$CONTAINER_IP" ]]; then
 fi
 
 # Remove stale SSH host key to prevent MitmPortForwardingDisabled on restart
-SSH_PORT=$(vm_exec "incus config device get ${CONTAINER} ssh-proxy listen 2>/dev/null" | grep -o '[0-9]*$' || true)
+SSH_PORT=$(device_proxy_port "$CONTAINER" "ssh-proxy")
 if [[ -n "$SSH_PORT" ]]; then
   ssh-keygen -R "[localhost]:${SSH_PORT}" 2>/dev/null || true
 fi
 
 # Stop
-vm_exec "incus stop '${CONTAINER}' --force 2>/dev/null || true"
+vm_run incus stop "${CONTAINER}" --force 2>/dev/null || true
 ok "Stopped ${CONTAINER}"
 
 # Remove if --rm
@@ -89,6 +89,6 @@ if [[ "$REMOVE" == "--rm" ]]; then
     deploy_key_cleanup "$NAME" "$REPO"
   fi
 
-  vm_exec "incus delete '${CONTAINER}'"
+  vm_run incus delete "${CONTAINER}"
   ok "Deleted ${CONTAINER}"
 fi

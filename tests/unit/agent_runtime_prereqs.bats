@@ -3,12 +3,13 @@ load '../test_helper/common'
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
-  VM_EXEC_LOG="${TEST_TMPDIR}/vm_exec.log"
+  EXEC_LOG="${TEST_TMPDIR}/exec.log"
   info() { :; }
   ok() { :; }
   warn() { :; }
-  vm_exec() {
-    printf '%s\n' "$1" >> "${VM_EXEC_LOG}"
+  container_exec_shell() {
+    local container="$1" command="$2" run_as="${3:-root}"
+    printf '%s|%s|%s\n' "${container}" "${run_as}" "${command}" >> "${EXEC_LOG}"
   }
 }
 
@@ -40,7 +41,7 @@ teardown() {
   run ensure_container_agent_runtime_prereqs "agent-test" "codex"
   assert_success
 
-  run cat "${VM_EXEC_LOG}"
+  run cat "${EXEC_LOG}"
   assert_success
   assert_output --partial "apt-get install -y nodejs"
   assert_output --partial "apt-get install -y bubblewrap"
@@ -52,8 +53,8 @@ teardown() {
   run ensure_container_agent_runtime_prereqs "agent-test" "codex"
   assert_success
 
-  if [[ -f "${VM_EXEC_LOG}" ]]; then
-    run cat "${VM_EXEC_LOG}"
+  if [[ -f "${EXEC_LOG}" ]]; then
+    run cat "${EXEC_LOG}"
     assert_success
     assert_output ""
   fi

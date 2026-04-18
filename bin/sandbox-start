@@ -71,7 +71,7 @@ apply_domain_filtering() {
 
   setup_container_domain_filter "$container" "$resolved_file" "$container_ip"
   redirect_container_to_squid "$container_ip"
-  vm_exec "iptables -I FORWARD -s '${container_ip}' -o '${OUTBOUND_IFACE}' -p udp --dport 443 -j DROP"
+  vm_run iptables -I FORWARD -s "${container_ip}" -o "${OUTBOUND_IFACE}" -p udp --dport 443 -j DROP
 
   ok "Domain filtering active (${resolved_name})"
 }
@@ -166,8 +166,8 @@ require_sandbox
 CONTAINER=$(container_name "$NAME")
 
 CONTAINER_STATE=""
-if vm_exec "incus info ${CONTAINER} &>/dev/null" 2>/dev/null; then
-  CONTAINER_STATE=$(vm_exec "incus info ${CONTAINER} 2>/dev/null | grep 'Status:' | awk '{print \$2}'" || true)
+if vm_run incus info "${CONTAINER}" >/dev/null 2>&1; then
+  CONTAINER_STATE=$(container_status "$CONTAINER" || true)
 fi
 
 if [[ "$CONTAINER_STATE" == "RUNNING" ]]; then
@@ -192,22 +192,22 @@ if [[ "$CONTAINER_STATE" == "STOPPED" ]]; then
   fi
 
   # Start the container
-  vm_exec "incus start ${CONTAINER}"
+  vm_run incus start "${CONTAINER}"
 
   # Wait for networking
   wait_for_container_networking "$CONTAINER"
 
   # Ensure workspace directory exists (may be missing in containers from old golden images)
-  vm_exec "incus exec ${CONTAINER} -- bash -c 'mkdir -p ${WORKSPACE_DIR} && chown ${SANDBOX_UID}:${SANDBOX_GID} ${WORKSPACE_DIR}'"
+  vm_run incus exec "${CONTAINER}" -- install -d -o "${SANDBOX_UID}" -g "${SANDBOX_GID}" "${WORKSPACE_DIR}"
 
   # Apply reconfigurable flags if provided
   if [[ -n "$CPU" ]]; then
     info "Updating CPU limit to ${CPU}..."
-    vm_exec "incus config set ${CONTAINER} limits.cpu=${CPU}"
+    vm_run incus config set "${CONTAINER}" "limits.cpu=${CPU}"
   fi
   if [[ -n "$MEMORY" ]]; then
     info "Updating memory limit to ${MEMORY}..."
-    vm_exec "incus config set ${CONTAINER} limits.memory=${MEMORY}"
+    vm_run incus config set "${CONTAINER}" "limits.memory=${MEMORY}"
   fi
 
   # Inject extra env vars (appends new ones to bashrc)
@@ -259,7 +259,8 @@ if [[ -n "$FROM" ]]; then
   FROM_CONTAINER=$(container_name "$FROM")
 
   if [[ -z "$REPO" ]]; then
-    REPO=$(vm_exec "incus exec ${FROM_CONTAINER} -- git -c safe.directory=${WORKSPACE_DIR} -C ${WORKSPACE_DIR} remote get-url origin 2>/dev/null" || true)
+    REPO=$(vm_run incus exec "${FROM_CONTAINER}" -- \
+      git -c "safe.directory=${WORKSPACE_DIR}" -C "${WORKSPACE_DIR}" remote get-url origin 2>/dev/null || true)
     [[ -n "$REPO" ]] || die "Could not determine repo URL from container '${FROM_CONTAINER}'"
     info "Inherited repo: ${REPO}"
   fi
@@ -326,33 +327,27 @@ fi
 # ── Create container ────────────────────────────────────────────────
 info "Creating '${CONTAINER}' from golden-${STACK}/ready (slot ${SLOT})..."
 
-vm_exec "
-  incus copy golden-${STACK}/ready ${CONTAINER}
-"
+vm_run incus copy "golden-${STACK}/ready" "${CONTAINER}"
 
 # Resource limits (only if explicitly set)
 if [[ -n "$CPU" ]]; then
-  vm_exec "incus config set ${CONTAINER} limits.cpu=${CPU}"
+  vm_run incus config set "${CONTAINER}" "limits.cpu=${CPU}"
 fi
 if [[ -n "$MEMORY" ]]; then
-  vm_exec "incus config set ${CONTAINER} limits.memory=${MEMORY}"
+  vm_run incus config set "${CONTAINER}" "limits.memory=${MEMORY}"
 fi
 
 # Proxy devices for port forwarding
-vm_exec "
-  incus config device add ${CONTAINER} ssh-proxy proxy \
-    listen=tcp:127.0.0.1:${SSH_P} connect=tcp:127.0.0.1:22
-
-  incus config device add ${CONTAINER} app-proxy proxy \
-    listen=tcp:127.0.0.1:${APP_P} connect=tcp:127.0.0.1:8080
-
-  incus config device add ${CONTAINER} alt-proxy proxy \
-    listen=tcp:127.0.0.1:${ALT_P} connect=tcp:127.0.0.1:9090
-"
+vm_run incus config device add "${CONTAINER}" ssh-proxy proxy \
+  "listen=tcp:127.0.0.1:${SSH_P}" "connect=tcp:127.0.0.1:22"
+vm_run incus config device add "${CONTAINER}" app-proxy proxy \
+  "listen=tcp:127.0.0.1:${APP_P}" "connect=tcp:127.0.0.1:8080"
+vm_run incus config device add "${CONTAINER}" alt-proxy proxy \
+  "listen=tcp:127.0.0.1:${ALT_P}" "connect=tcp:127.0.0.1:9090"
 
 # Start
-vm_exec "incus start ${CONTAINER}"
-vm_exec "sleep 3"
+vm_run incus start "${CONTAINER}"
+sleep 3
 
 # ── Host SSH key (for user SSH access) ────────────────────────────
 HOST_PUBKEY=""
@@ -409,15 +404,31 @@ if [[ -n "$REPO" ]]; then
   info "Cloning repository..."
 
   # Configure safe.directory for ubuntu user and clone as ubuntu
-  vm_run incus exec "${CONTAINER}" --user ${SANDBOX_UID} --group ${SANDBOX_GID} --env HOME=${SANDBOX_USER_HOME} -- \
-    bash -c "git config --global safe.directory '*' && SSH_AUTH_SOCK=/run/ssh-agent.sock git clone ${REPO} ${WORKSPACE_DIR}" \
+  vm_run incus exec "${CONTAINER}" --user "${SANDBOX_UID}" --group "${SANDBOX_GID}" --env "HOME=${SANDBOX_USER_HOME}" -- \
+    git config --global safe.directory '*' \
+    || die "Failed to configure git safe.directory in ${CONTAINER}"
+  vm_run incus exec "${CONTAINER}" \
+    --user "${SANDBOX_UID}" \
+    --group "${SANDBOX_GID}" \
+    --env "HOME=${SANDBOX_USER_HOME}" \
+    --env "SSH_AUTH_SOCK=/run/ssh-agent.sock" \
+    -- \
+    git clone "${REPO}" "${WORKSPACE_DIR}" \
     || die "Git clone failed. Check SSH key and repo access."
 
   # Switch to requested branch (checkout if it exists remotely, create if it doesn't)
   if [[ -n "$BRANCH" ]]; then
-    vm_run incus exec "${CONTAINER}" --user ${SANDBOX_UID} --group ${SANDBOX_GID} --env HOME=${SANDBOX_USER_HOME} -- \
-      bash -c "cd ${WORKSPACE_DIR} && git checkout ${BRANCH} 2>/dev/null || git checkout -b ${BRANCH}" \
-      || die "Failed to switch to branch '${BRANCH}'"
+    vm_run incus exec "${CONTAINER}" \
+      --user "${SANDBOX_UID}" \
+      --group "${SANDBOX_GID}" \
+      --env "HOME=${SANDBOX_USER_HOME}" \
+      -- \
+      bash -s -- "${WORKSPACE_DIR}" "${BRANCH}" <<'EOF' || die "Failed to switch to branch '${BRANCH}'"
+workspace_dir="$1"
+branch_name="$2"
+cd "$workspace_dir"
+git checkout "$branch_name" 2>/dev/null || git checkout -b "$branch_name"
+EOF
     ok "Repository cloned (branch: ${BRANCH})"
   else
     ok "Repository cloned"
@@ -426,7 +437,7 @@ fi
 
 # Ensure workspace directory exists for scratch containers (no repo)
 if [[ -z "$REPO" ]]; then
-  vm_run incus exec "${CONTAINER}" --user ${SANDBOX_UID} --group ${SANDBOX_GID} -- \
+  vm_run incus exec "${CONTAINER}" --user "${SANDBOX_UID}" --group "${SANDBOX_GID}" -- \
     mkdir -p "${WORKSPACE_DIR}"
 fi
 

@@ -124,9 +124,7 @@ for p in "${proto_list[@]}"; do
 done
 
 # Get container IP for egress rules
-CONTAINER_IP=$(vm_exec "
-  incus list ${CONTAINER} -f csv -c 4 2>/dev/null | grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' | head -1
-")
+CONTAINER_IP=$(get_container_ip "$CONTAINER")
 [[ -n "$CONTAINER_IP" ]] || die "Could not determine container IP"
 
 add_port() {
@@ -134,16 +132,12 @@ add_port() {
   local device_name="port-${PORT}-${p}"
 
   # Inbound: host → container (listen on HOST_PORT, connect to container PORT)
-  vm_exec "
-    incus config device add '${CONTAINER}' '${device_name}' proxy \
-      'listen=${p}:0.0.0.0:${HOST_PORT}' \
-      'connect=${p}:127.0.0.1:${PORT}'
-  "
+  vm_run incus config device add "${CONTAINER}" "${device_name}" proxy \
+    "listen=${p}:0.0.0.0:${HOST_PORT}" \
+    "connect=${p}:127.0.0.1:${PORT}"
 
   # Outbound: container → external
-  vm_exec "
-    sudo iptables -I FORWARD -s '${CONTAINER_IP}' -o '${OUTBOUND_IFACE}' -p ${p} --dport ${PORT} -j ACCEPT
-  "
+  vm_run iptables -I FORWARD -s "${CONTAINER_IP}" -o "${OUTBOUND_IFACE}" -p "${p}" --dport "${PORT}" -j ACCEPT
 }
 
 for p in "${proto_list[@]}"; do
