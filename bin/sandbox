@@ -1,59 +1,82 @@
 #!/usr/bin/env bash
 # sandbox <name> [name2...] [flags]
-# Session entry point: shell, Claude, or command. Auto-tmux for multiple containers.
+# Session entry point: shell, agent CLI, or command. Auto-tmux for multiple containers.
 #
 # Examples:
 #   sandbox proj-alpha                        # shell into one
 #   sandbox proj-alpha proj-beta              # tmux with shells
-#   sandbox proj-alpha --claude               # run claude
-#   sandbox proj-alpha proj-beta --claude     # tmux with claude
+#   sandbox proj-alpha --agent codex          # run codex
+#   sandbox proj-alpha --agent claude         # run claude
+#   sandbox proj-alpha proj-beta --agent codex  # tmux with codex
 #   sandbox proj-alpha --cmd "git status"     # run command
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
 # ── Parse args ──────────────────────────────────────────────────────
 NAMES=()
-MODE="shell"   # shell | claude | cmd
+MODE="shell"   # shell | agent | cmd
 CMD=""
+REQUESTED_AGENT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --claude) MODE="claude"; shift ;;
+    --claude) MODE="agent"; REQUESTED_AGENT="claude"; shift ;;
+    --agent)  [[ -n "${2:-}" ]] || die "--agent requires a value"; MODE="agent"; REQUESTED_AGENT="$2"; shift 2 ;;
     --cmd)    [[ -n "${2:-}" ]] || die "--cmd requires a value"; MODE="cmd"; CMD="$2"; shift 2 ;;
     --*)      die "Unknown flag: $1" ;;
     *)        NAMES+=("$1"); shift ;;
   esac
 done
 
-[[ ${#NAMES[@]} -gt 0 ]] || die "Usage: sandbox <name> [name2...] [--claude] [--cmd \"command\"]"
+[[ ${#NAMES[@]} -gt 0 ]] || die "Usage: sandbox <name> [name2...] [--agent <name>] [--cmd \"command\"] [--claude]"
 
 require_sandbox
 
 # ── Build the command to run in each container ──────────────────────
-build_session_cmd() {
+SESSION_CMD_ARGS=()
+
+shell_quote_args() {
+  local quoted=()
+  local arg
+  for arg in "$@"; do
+    quoted+=("$(printf '%q' "$arg")")
+  done
+
+  local IFS=' '
+  echo "${quoted[*]}"
+}
+
+build_session_args() {
   local name="$1"
   local container
   container=$(container_name "$name")
 
-  local exec_prefix
+  SESSION_CMD_ARGS=()
   if [[ "$SANDBOX_PLATFORM" == "macos" ]]; then
-    exec_prefix="orb run -m ${SANDBOX_MACHINE} sudo"
-  else
-    exec_prefix=""
+    SESSION_CMD_ARGS+=(orb run -m "${SANDBOX_MACHINE}" sudo)
   fi
 
-  local user_flags="--user ${SANDBOX_UID} --group ${SANDBOX_GID} --cwd ${WORKSPACE_DIR} --env HOME=${SANDBOX_USER_HOME}"
+  SESSION_CMD_ARGS+=(
+    incus exec "${container}"
+    --user "${SANDBOX_UID}"
+    --group "${SANDBOX_GID}"
+    --cwd "${WORKSPACE_DIR}"
+    --env "HOME=${SANDBOX_USER_HOME}"
+    --
+  )
 
   case "$MODE" in
     shell)
-      echo "${exec_prefix} incus exec ${container} ${user_flags} -- bash --login"
+      SESSION_CMD_ARGS+=(bash --login)
       ;;
-    claude)
-      echo "${exec_prefix} incus exec ${container} ${user_flags} -- bash --login -c 'claude --dangerously-skip-permissions'"
+    agent)
+      local resolved_agent launch_command
+      resolved_agent=$(resolve_container_agent_id "$container" "$REQUESTED_AGENT")
+      launch_command=$(agent_launch_command "$resolved_agent")
+      SESSION_CMD_ARGS+=(bash --login -c "$launch_command")
       ;;
     cmd)
-      local escaped_cmd="${CMD//\'/\'\\\'\'}"
-      echo "${exec_prefix} incus exec ${container} ${user_flags} -- bash --login -c '${escaped_cmd}'"
+      SESSION_CMD_ARGS+=(bash --login -c "$CMD")
       ;;
   esac
 }
@@ -70,7 +93,8 @@ done
 
 # ── Single container: direct session ────────────────────────────────
 if [[ ${#NAMES[@]} -eq 1 ]]; then
-  eval "exec $(build_session_cmd "${NAMES[0]}")"
+  build_session_args "${NAMES[0]}"
+  exec "${SESSION_CMD_ARGS[@]}"
 fi
 
 # ── Multiple containers: tmux ───────────────────────────────────────
@@ -80,12 +104,14 @@ SESSION="sandbox-agents"
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
 # First pane
-FIRST_CMD=$(build_session_cmd "${NAMES[0]}")
+build_session_args "${NAMES[0]}"
+FIRST_CMD=$(shell_quote_args "${SESSION_CMD_ARGS[@]}")
 tmux new-session -d -s "$SESSION" -n "agents" "$FIRST_CMD"
 
 # Remaining panes
 for ((i=1; i<${#NAMES[@]}; i++)); do
-  PANE_CMD=$(build_session_cmd "${NAMES[$i]}")
+  build_session_args "${NAMES[$i]}"
+  PANE_CMD=$(shell_quote_args "${SESSION_CMD_ARGS[@]}")
   tmux split-window -t "$SESSION" "$PANE_CMD"
   tmux select-layout -t "$SESSION" tiled
 done

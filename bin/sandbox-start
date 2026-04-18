@@ -17,13 +17,17 @@ MEMORY=""
 EXTRA_ENVS=()
 RESTRICT_DOMAINS=""
 DOMAINS_FILE=""
+AGENT_IDS=()
+DEFAULT_AGENT=""
 
 # ── Helpers ──────────────────────────────────────────────────────
 apply_domain_filtering() {
   local container="$1" domains_file="$2"
+  shift 2
+  local selected_agents=("$@")
   local resolved_file resolved_name container_ip
 
-  resolved_file=$(resolve_domains_file "$domains_file")
+  resolved_file=$(write_merged_agent_allowlist_file "$domains_file" "${selected_agents[@]}")
   resolved_name=$(basename "$resolved_file")
 
   container_ip=$(get_container_ip "$container")
@@ -60,9 +64,16 @@ print_connection_summary() {
   echo "  VS Code:   code --remote ssh-remote+ubuntu@localhost:${ssh_p} ${WORKSPACE_DIR}"
   echo "  App:       http://localhost:${app_p}"
   echo "  Alt:       http://localhost:${alt_p}"
+  local installed_agents default_agent
+  installed_agents=$(get_installed_agents_metadata "$container")
+  default_agent=$(get_default_agent_metadata "$container")
+  [[ -n "$installed_agents" ]] && echo "  Agents:    ${installed_agents}"
+  [[ -n "$default_agent" ]] && echo "  Default:   ${default_agent}"
   echo ""
   echo "  Shell:     sandbox ${name}"
-  echo "  Claude:    sandbox ${name} --claude"
+  [[ -n "$default_agent" ]] && echo "  Agent:     sandbox ${name} --agent ${default_agent}"
+  echo "  Codex:     sandbox ${name} --agent codex"
+  echo "  Claude:    sandbox ${name} --agent claude"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -75,6 +86,8 @@ while [[ $# -gt 0 ]]; do
     --cpu)              [[ -n "${2:-}" ]] || die "--cpu requires a value"; CPU="$2"; shift 2 ;;
     --memory)           [[ -n "${2:-}" ]] || die "--memory requires a value"; MEMORY="$2"; shift 2 ;;
     --env)              [[ -n "${2:-}" ]] || die "--env requires a value"; EXTRA_ENVS+=("$2"); shift 2 ;;
+    --agent)            [[ -n "${2:-}" ]] || die "--agent requires a value"; AGENT_IDS+=("$2"); shift 2 ;;
+    --default-agent)    [[ -n "${2:-}" ]] || die "--default-agent requires a value"; DEFAULT_AGENT="$2"; shift 2 ;;
     --restrict-domains) RESTRICT_DOMAINS="yes"; shift ;;
     --domains-file)     [[ -n "${2:-}" ]] || die "--domains-file requires a value"; RESTRICT_DOMAINS="yes"; DOMAINS_FILE="$2"; shift 2 ;;
     --*)                die "Unknown flag: $1" ;;
@@ -92,6 +105,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$NAME" ]] || die "Usage: sandbox-start <name> [repo-url] [flags]"
+
+if [[ ${#AGENT_IDS[@]} -gt 0 ]]; then
+  SELECTED_AGENTS_CSV=$(resolve_selected_agents "${AGENT_IDS[@]}")
+else
+  SELECTED_AGENTS_CSV=$(resolve_selected_agents)
+fi
+SELECTED_AGENT_IDS=()
+while IFS= read -r agent_id; do
+  [[ -n "$agent_id" ]] || continue
+  SELECTED_AGENT_IDS+=("$agent_id")
+done < <(parse_agent_ids "$SELECTED_AGENTS_CSV")
+DEFAULT_AGENT=$(select_default_agent "$DEFAULT_AGENT" ${SELECTED_AGENT_IDS[@]+"${SELECTED_AGENT_IDS[@]}"})
 
 # ── Check for existing container (restart-or-create) ──────────────
 require_sandbox
@@ -117,6 +142,8 @@ if [[ "$CONTAINER_STATE" == "STOPPED" ]]; then
   [[ -n "$REPO" ]]         && IMMUTABLE_ERROR+="  --repo (cannot change repo on restart)\n"
   [[ -n "$BRANCH" ]]       && IMMUTABLE_ERROR+="  --branch (cannot change branch on restart)\n"
   [[ -n "$SLOT" ]]         && IMMUTABLE_ERROR+="  --slot (cannot change slot on restart)\n"
+  [[ ${#AGENT_IDS[@]} -gt 0 ]] && IMMUTABLE_ERROR+="  --agent (cannot change selected agents on restart)\n"
+  [[ -n "$DEFAULT_AGENT" && "$DEFAULT_AGENT" != "$(get_default_agent_metadata "$CONTAINER")" ]] && IMMUTABLE_ERROR+="  --default-agent (cannot change default agent on restart)\n"
   if [[ -n "$IMMUTABLE_ERROR" ]]; then
     die "Cannot change these flags on restart (destroy and recreate instead):\n${IMMUTABLE_ERROR}Use 'sandbox-stop ${NAME} --rm' first, then 'sandbox-start ${NAME} ...' to recreate."
   fi
@@ -161,7 +188,7 @@ if [[ "$CONTAINER_STATE" == "STOPPED" ]]; then
   # Handle domain filtering updates
   if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
     info "Applying domain-based egress filtering..."
-    apply_domain_filtering "$CONTAINER" "$DOMAINS_FILE"
+    apply_domain_filtering "$CONTAINER" "$DOMAINS_FILE" ${SELECTED_AGENT_IDS[@]+"${SELECTED_AGENT_IDS[@]}"}
     set_metadata "$CONTAINER" "restrict-domains" "yes"
     [[ -n "$DOMAINS_FILE" ]] && set_metadata "$CONTAINER" "domains-file" "$DOMAINS_FILE"
   else
@@ -169,7 +196,12 @@ if [[ "$CONTAINER_STATE" == "STOPPED" ]]; then
     if [[ "$EXISTING_RESTRICT" == "yes" ]]; then
       info "Re-applying domain filtering from saved configuration..."
       EXISTING_DOMAINS_FILE=$(get_metadata "$CONTAINER" "domains-file")
-      apply_domain_filtering "$CONTAINER" "$EXISTING_DOMAINS_FILE"
+      EXISTING_AGENT_IDS=()
+      while IFS= read -r agent_id; do
+        [[ -n "$agent_id" ]] || continue
+        EXISTING_AGENT_IDS+=("$agent_id")
+      done < <(effective_container_agent_ids "$CONTAINER")
+      apply_domain_filtering "$CONTAINER" "$EXISTING_DOMAINS_FILE" ${EXISTING_AGENT_IDS[@]+"${EXISTING_AGENT_IDS[@]}"}
     fi
   fi
 
@@ -308,15 +340,21 @@ fi
 # ── Env vars ────────────────────────────────────────────────────────
 inject_env "$CONTAINER" ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}
 
+# ── Selected agent CLIs ─────────────────────────────────────────────
+ensure_container_agent_runtime_prereqs "$CONTAINER" ${SELECTED_AGENT_IDS[@]+"${SELECTED_AGENT_IDS[@]}"}
+install_selected_agent_clis "$CONTAINER" ${SELECTED_AGENT_IDS[@]+"${SELECTED_AGENT_IDS[@]}"}
+
 # ── Domain filtering ───────────────────────────────────────────────
 if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
   info "Applying domain-based egress filtering..."
-  apply_domain_filtering "$CONTAINER" "$DOMAINS_FILE"
+  apply_domain_filtering "$CONTAINER" "$DOMAINS_FILE" ${SELECTED_AGENT_IDS[@]+"${SELECTED_AGENT_IDS[@]}"}
 fi
 
 # ── Store metadata ──────────────────────────────────────────────────
 set_metadata "$CONTAINER" "slot" "$SLOT"
 set_metadata "$CONTAINER" "stack" "$STACK"
+set_installed_agents_metadata "$CONTAINER" ${SELECTED_AGENT_IDS[@]+"${SELECTED_AGENT_IDS[@]}"}
+set_default_agent_metadata "$CONTAINER" "$DEFAULT_AGENT"
 [[ -n "$REPO" ]] && set_metadata "$CONTAINER" "repo" "$REPO"
 if [[ "$RESTRICT_DOMAINS" == "yes" ]]; then
   set_metadata "$CONTAINER" "restrict-domains" "yes"

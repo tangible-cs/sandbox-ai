@@ -5,105 +5,93 @@ source "${SCRIPT_DIR}/../lib/sandbox-common.sh"
 
 require_sandbox
 
-vm_run bash << 'INNERLIST'
-#!/usr/bin/env bash
+CONTAINERS=$(vm_exec "incus list -f csv -c n 2>/dev/null | grep '^agent-' || true")
 
-CONTAINERS=$(incus list -f csv -c n 2>/dev/null | grep "^agent-" || true)
-
-if [ -z "$CONTAINERS" ]; then
+if [[ -z "$CONTAINERS" ]]; then
   echo "No agent containers found"
   exit 0
 fi
 
-# Header
-printf "\n%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %s\n" \
-  "CONTAINER" "STATE" "SLOT" "SSH" "APP" "ALT" "EXTRA" "EGRESS" "DOCKER" "AGENT" "CLAUDE" "REPO"
-printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %s\n" \
-  "─────────" "─────" "────" "───" "───" "───" "─────" "──────" "──────" "─────" "──────" "────"
+printf "\n%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-14s %-24s %s\n" \
+  "CONTAINER" "STATE" "SLOT" "SSH" "APP" "ALT" "EXTRA" "EGRESS" "DOCKER" "SSHAGENT" "DEFAULT" "AUTH" "REPO"
+printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-14s %-24s %s\n" \
+  "─────────" "─────" "────" "───" "───" "───" "─────" "──────" "──────" "────────" "───────" "────" "────"
 
 for c in $CONTAINERS; do
-  state=$(incus info "$c" 2>/dev/null | grep "Status:" | awk '{print $2}')
+  state=$(vm_exec "incus info ${c} 2>/dev/null | grep 'Status:' | awk '{print \$2}'" || true)
 
-  # Ports
-  ssh_p=$(incus config device get "$c" ssh-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo "-")
-  app_p=$(incus config device get "$c" app-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo "-")
-  alt_p=$(incus config device get "$c" alt-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo "-")
+  ssh_p=$(vm_exec "incus config device get ${c} ssh-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo '-'" || true)
+  app_p=$(vm_exec "incus config device get ${c} app-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo '-'" || true)
+  alt_p=$(vm_exec "incus config device get ${c} alt-proxy listen 2>/dev/null | grep -o '[0-9]*$' || echo '-'" || true)
 
-  # Slot (from SSH port)
-  if [ "$ssh_p" != "-" ]; then
+  if [[ "$ssh_p" != "-" ]]; then
     slot=$(( ssh_p - 2200 ))
   else
     slot="-"
   fi
 
-  # Extra ports (show host→container when they differ)
   extras=""
-  for dev in $(incus config device list "$c" 2>/dev/null | grep "^port-" || true); do
-    listen_port=$(incus config device get "$c" "$dev" listen 2>/dev/null | grep -o '[0-9]*$' || true)
-    connect_port=$(incus config device get "$c" "$dev" connect 2>/dev/null | grep -o '[0-9]*$' || true)
-    if [ -n "$listen_port" ]; then
-      [ -n "$extras" ] && extras="${extras},"
-      if [ -n "$connect_port" ] && [ "$listen_port" != "$connect_port" ]; then
+  while IFS= read -r dev; do
+    [[ -n "$dev" ]] || continue
+    listen_port=$(vm_exec "incus config device get ${c} ${dev} listen 2>/dev/null | grep -o '[0-9]*$' || true" || true)
+    connect_port=$(vm_exec "incus config device get ${c} ${dev} connect 2>/dev/null | grep -o '[0-9]*$' || true" || true)
+    if [[ -n "$listen_port" ]]; then
+      [[ -n "$extras" ]] && extras="${extras},"
+      if [[ -n "$connect_port" && "$listen_port" != "$connect_port" ]]; then
         extras="${extras}${listen_port}→${connect_port}"
       else
         extras="${extras}${listen_port}"
       fi
     fi
-  done
-  [ -z "$extras" ] && extras="-"
+  done < <(vm_exec "incus config device list ${c} 2>/dev/null | grep '^port-' || true")
+  [[ -n "$extras" ]] || extras="-"
 
-  # Egress filtering status (works for running and stopped containers)
   egress_status="open"
-  restrict=$(incus config get "$c" user.sandbox.restrict-domains 2>/dev/null || true)
-  if [ "$restrict" = "yes" ]; then
+  if [[ "$(get_metadata "$c" "restrict-domains")" == "yes" ]]; then
     egress_status="filtered"
   fi
 
-  # Health checks (only for running containers)
   docker_status="-"
-  agent_status="-"
-  claude_status="-"
+  ssh_agent_status="-"
   repo_info="-"
+  default_agent=$(resolve_container_agent_id "$c" "")
+  installed_agents=()
+  while IFS= read -r agent_id; do
+    [[ -n "$agent_id" ]] || continue
+    installed_agents+=("$agent_id")
+  done < <(effective_container_agent_ids "$c")
+  auth_status="-"
 
-  if [ "$state" = "RUNNING" ]; then
-    # Docker
-    if incus exec "$c" -- docker info &>/dev/null; then
+  if [[ "$state" == "RUNNING" ]]; then
+    if vm_exec "incus exec ${c} -- docker info &>/dev/null"; then
       docker_status="ok"
     else
       docker_status="err"
     fi
 
-    # SSH agent
-    agent_out=$(incus exec "$c" -- bash -c 'SSH_AUTH_SOCK=/run/ssh-agent.sock ssh-add -l 2>&1' || true)
+    agent_out=$(vm_exec "incus exec ${c} -- bash -c 'SSH_AUTH_SOCK=/run/ssh-agent.sock ssh-add -l 2>&1' || true" || true)
     if echo "$agent_out" | grep -q "no identities"; then
-      agent_status="no-key"
+      ssh_agent_status="no-key"
     elif echo "$agent_out" | grep -q "Could not open\|Error\|refused"; then
-      agent_status="none"
+      ssh_agent_status="none"
     elif echo "$agent_out" | grep -qE "^[0-9]"; then
-      agent_status="ok"
+      ssh_agent_status="ok"
     else
-      agent_status="none"
+      ssh_agent_status="none"
     fi
 
-    # Claude auth
-    if incus exec "$c" -- test -d /home/ubuntu/.claude 2>/dev/null && \
-       incus exec "$c" -- bash -c 'ls /home/ubuntu/.claude/.credentials* 2>/dev/null || ls /home/ubuntu/.claude/auth* 2>/dev/null' &>/dev/null; then
-      claude_status="auth'd"
-    else
-      claude_status="no-auth"
-    fi
+    auth_status=$(format_agent_auth_statuses "$c" "${installed_agents[@]}")
 
-    # Repo info
-    if incus exec "$c" -- test -d /workspace/project/.git 2>/dev/null; then
-      remote=$(incus exec "$c" -- git -c safe.directory=/workspace/project -C /workspace/project remote get-url origin 2>/dev/null | sed -E 's#.*github\.com[:/]##; s#\.git$##' || echo "?")
-      branch=$(incus exec "$c" -- git -c safe.directory=/workspace/project -C /workspace/project branch --show-current 2>/dev/null || echo "?")
+    if vm_exec "incus exec ${c} -- test -d ${WORKSPACE_DIR}/.git 2>/dev/null"; then
+      remote=$(vm_exec "incus exec ${c} -- git -c safe.directory=${WORKSPACE_DIR} -C ${WORKSPACE_DIR} remote get-url origin 2>/dev/null | sed -E 's#.*github\\.com[:/]##; s#\\.git\$##' || echo '?'" || true)
+      branch=$(vm_exec "incus exec ${c} -- git -c safe.directory=${WORKSPACE_DIR} -C ${WORKSPACE_DIR} branch --show-current 2>/dev/null || echo '?'" || true)
       repo_info="${remote} (${branch})"
     fi
   fi
 
-  printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-8s %s\n" \
+  printf "%-25s %-9s %-5s %-6s %-6s %-6s %-20s %-10s %-8s %-8s %-14s %-24s %s\n" \
     "$c" "$state" "$slot" "$ssh_p" "$app_p" "$alt_p" "$extras" \
-    "$egress_status" "$docker_status" "$agent_status" "$claude_status" "$repo_info"
+    "$egress_status" "$docker_status" "$ssh_agent_status" "$default_agent" "$auth_status" "$repo_info"
 done
+
 echo ""
-INNERLIST

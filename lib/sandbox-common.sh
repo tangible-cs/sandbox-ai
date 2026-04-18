@@ -8,11 +8,13 @@ set -euo pipefail
 SANDBOX_MACHINE="sandbox"
 SANDBOX_KEY_DIR="${HOME}/.sandbox/keys"
 SANDBOX_ENV_FILE="${HOME}/.sandbox/env"
+SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SANDBOX_AGENTS_DIR="${SANDBOX_ROOT}/agents"
 WORKSPACE_DIR="/workspace/project"
 SANDBOX_UID=1000
 SANDBOX_GID=1000
 SANDBOX_USER_HOME="/home/ubuntu"
-SANDBOX_DEFAULT_DOMAINS="${SCRIPT_DIR}/../domains/anthropic-default.txt"
+SANDBOX_DEFAULT_DOMAINS="${SANDBOX_ROOT}/domains/anthropic-default.txt"
 SANDBOX_USER_DOMAINS="${HOME}/.sandbox/allowed-domains.txt"
 SQUID_PORT=3129
 
@@ -96,6 +98,409 @@ require_container() {
   local container="$1"
   vm_exec "incus info ${container} &>/dev/null" 2>/dev/null \
     || die "Container '${container}' not found"
+}
+
+# ── Agent CLI registry ─────────────────────────────────────────────
+clear_cli_config_vars() {
+  local vars=(
+    CLI_ID CLI_DISPLAY_NAME CLI_BINARY_NAME CLI_INSTALL_STRATEGY
+    CLI_INSTALL_REF CLI_INSTALL_COMMAND CLI_INSTALL_USER
+    CLI_UPDATE_COMMAND CLI_UNINSTALL_COMMAND
+    CLI_LAUNCH_COMMAND CLI_HEADLESS_COMMAND CLI_VERSION_CHECK_COMMAND
+    CLI_POST_INSTALL_VALIDATION_COMMAND CLI_AUTH_STRATEGY CLI_AUTH_COMMAND
+    CLI_AUTH_CHECK_COMMAND CLI_CREDENTIAL_PATHS CLI_REQUIRED_ENV_VARS
+    CLI_OPTIONAL_ENV_VARS CLI_SUPPORTS_CHATGPT_SUBSCRIPTION_LOGIN
+    CLI_SUPPORTS_BROWSER_LOGIN CLI_REQUIRES_NODE CLI_REQUIRES_PYTHON
+    CLI_REQUIRES_UV_OR_PIPX CLI_RUNTIME_PREREQS CLI_CACHE_STRATEGY
+    CLI_CACHE_KEY CLI_ALLOWLIST_FILE CLI_SESSION_HOME_SUBDIR
+    CLI_STATUS_LABEL CLI_PATH_LINK_SOURCE CLI_PATH_LINK_TARGET
+    CLI_DEFAULT_FLAGS CLI_NOTES
+  )
+  local var
+  for var in "${vars[@]}"; do
+    unset "$var" 2>/dev/null || true
+  done
+}
+
+cli_config_path() {
+  local agent_id="${1:-}"
+  [[ -n "$agent_id" ]] || die "Agent id is required"
+  local path="${SANDBOX_AGENTS_DIR}/${agent_id}.conf"
+  [[ -f "$path" ]] || die "Unknown agent: ${agent_id}"
+  echo "$path"
+}
+
+list_agent_ids() {
+  local path
+  for path in "${SANDBOX_AGENTS_DIR}"/*.conf; do
+    [[ -e "$path" ]] || continue
+    basename "$path" .conf
+  done | sort
+}
+
+validate_cli_config_file() {
+  local config_path="${1:-}"
+  [[ -n "$config_path" ]] || die "Config path is required"
+  [[ -f "$config_path" ]] || die "Agent config not found: ${config_path}"
+
+  clear_cli_config_vars
+  # shellcheck disable=SC1090
+  source "$config_path"
+
+  local required_nonempty=(
+    CLI_ID CLI_DISPLAY_NAME CLI_BINARY_NAME CLI_INSTALL_STRATEGY
+    CLI_INSTALL_REF CLI_INSTALL_COMMAND CLI_INSTALL_USER CLI_LAUNCH_COMMAND
+    CLI_VERSION_CHECK_COMMAND CLI_AUTH_STRATEGY CLI_AUTH_COMMAND
+    CLI_AUTH_CHECK_COMMAND CLI_REQUIRES_NODE CLI_REQUIRES_PYTHON
+    CLI_REQUIRES_UV_OR_PIPX CLI_CACHE_STRATEGY CLI_CACHE_KEY
+    CLI_SESSION_HOME_SUBDIR CLI_STATUS_LABEL
+  )
+  local required_defined=(
+    CLI_ALLOWLIST_FILE CLI_RUNTIME_PREREQS CLI_PATH_LINK_SOURCE
+    CLI_PATH_LINK_TARGET CLI_DEFAULT_FLAGS
+  )
+  local field
+  for field in "${required_nonempty[@]}"; do
+    [[ -n "${!field:-}" ]] || die "Agent config '${config_path}' missing required field: ${field}"
+  done
+  for field in "${required_defined[@]}"; do
+    [[ ${!field+x} ]] || die "Agent config '${config_path}' missing required field: ${field}"
+  done
+
+  [[ "$CLI_ID" == "$(basename "$config_path" .conf)" ]] \
+    || die "Agent config '${config_path}' has mismatched CLI_ID: ${CLI_ID}"
+}
+
+load_cli_config() {
+  local agent_id="${1:-}"
+  local config_path
+  config_path=$(cli_config_path "$agent_id")
+  validate_cli_config_file "$config_path" >/dev/null
+  clear_cli_config_vars
+  # shellcheck disable=SC1090
+  source "$config_path"
+}
+
+# ── Agent metadata helpers ─────────────────────────────────────────
+serialize_agent_ids() {
+  local out=()
+  local seen=","
+  local agent_id
+  for agent_id in "$@"; do
+    [[ -n "$agent_id" ]] || continue
+    if [[ "$seen" != *",${agent_id},"* ]]; then
+      out+=("$agent_id")
+      seen="${seen}${agent_id},"
+    fi
+  done
+
+  local IFS=,
+  echo "${out[*]-}"
+}
+
+parse_agent_ids() {
+  local value="${1:-}"
+  [[ -n "$value" ]] || return 0
+  tr ',' '\n' <<< "$value" | sed '/^$/d'
+}
+
+set_installed_agents_metadata() {
+  local container="$1"
+  shift
+  local value
+  value=$(serialize_agent_ids "$@")
+  set_metadata "$container" "agents" "$value"
+}
+
+get_installed_agents_metadata() {
+  local container="$1"
+  get_metadata "$container" "agents"
+}
+
+list_installed_agents_metadata() {
+  local container="$1"
+  parse_agent_ids "$(get_installed_agents_metadata "$container")"
+}
+
+set_default_agent_metadata() {
+  local container="$1"
+  local agent_id="${2:-}"
+  [[ -n "$agent_id" ]] || die "set_default_agent_metadata requires a non-empty agent id"
+  set_metadata "$container" "default-agent" "$agent_id"
+}
+
+get_default_agent_metadata() {
+  local container="$1"
+  get_metadata "$container" "default-agent"
+}
+
+default_install_agent_ids() {
+  echo "codex"
+}
+
+resolve_selected_agents() {
+  local selected=("$@")
+  if [[ ${#selected[@]} -eq 0 ]]; then
+    serialize_agent_ids "$(default_install_agent_ids)"
+    return 0
+  fi
+
+  local agent_id
+  for agent_id in "${selected[@]}"; do
+    cli_config_path "$agent_id" >/dev/null
+  done
+
+  serialize_agent_ids "${selected[@]}"
+}
+
+select_default_agent() {
+  local requested_default="${1:-}"
+  shift || true
+
+  local selected_csv
+  selected_csv=$(serialize_agent_ids "$@")
+  [[ -n "$selected_csv" ]] || die "select_default_agent requires at least one selected agent"
+
+  if [[ -z "$requested_default" ]]; then
+    parse_agent_ids "$selected_csv" | head -1
+    return 0
+  fi
+
+  cli_config_path "$requested_default" >/dev/null
+  if ! parse_agent_ids "$selected_csv" | grep -qx "$requested_default"; then
+    die "--default-agent '${requested_default}' must also be included via --agent"
+  fi
+  echo "$requested_default"
+}
+
+runtime_prereqs_for_agents() {
+  local prereqs=()
+  local agent_id
+  local extra_prereq
+  for agent_id in "$@"; do
+    [[ -n "$agent_id" ]] || continue
+    load_cli_config "$agent_id"
+    [[ "${CLI_REQUIRES_NODE}" == "yes" ]] && prereqs+=("node")
+    [[ "${CLI_REQUIRES_PYTHON}" == "yes" ]] && prereqs+=("python")
+    for extra_prereq in ${CLI_RUNTIME_PREREQS}; do
+      [[ -n "$extra_prereq" ]] && prereqs+=("$extra_prereq")
+    done
+  done
+
+  serialize_agent_ids "${prereqs[@]-}"
+}
+
+container_command_exists() {
+  local container="$1" command_name="$2"
+  vm_exec "incus exec ${container} -- bash -lc 'command -v ${command_name}'" >/dev/null 2>&1
+}
+
+container_exec_shell() {
+  local container="$1" command="$2" run_as="${3:-root}"
+  local escaped_command="${command//\'/\'\\\'\'}"
+  if [[ "$run_as" == "ubuntu" ]]; then
+    vm_exec "incus exec ${container} --user ${SANDBOX_UID} --group ${SANDBOX_GID} --env HOME=${SANDBOX_USER_HOME} -- bash -lc '${escaped_command}'"
+  else
+    vm_exec "incus exec ${container} -- bash -lc '${escaped_command}'"
+  fi
+}
+
+ensure_container_node_runtime() {
+  local container="$1"
+  if container_command_exists "$container" "node" && container_command_exists "$container" "npm"; then
+    return 0
+  fi
+
+  info "Installing Node.js runtime in ${container}..."
+  container_exec_shell "$container" "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs && apt-get clean && rm -rf /var/lib/apt/lists/*"
+}
+
+ensure_container_agent_runtime_prereqs() {
+  local container="$1"
+  shift
+  local prereqs_csv
+  local prereq
+  prereqs_csv=$(runtime_prereqs_for_agents "$@")
+  while IFS= read -r prereq; do
+    case "$prereq" in
+      node|npm) ensure_container_node_runtime "$container" ;;
+      python|"") ;;
+      *) warn "Unknown runtime prerequisite '${prereq}' requested by agent config; skipping" ;;
+    esac
+  done < <(parse_agent_ids "$prereqs_csv")
+}
+
+validate_agent_cli_installation() {
+  local container="$1" agent_id="$2"
+  load_cli_config "$agent_id"
+  container_exec_shell "$container" "$CLI_VERSION_CHECK_COMMAND" "$CLI_INSTALL_USER" >/dev/null
+}
+
+container_has_agent_cli() {
+  local container="$1" agent_id="$2"
+  validate_agent_cli_installation "$container" "$agent_id" >/dev/null 2>&1
+}
+
+install_agent_cli() {
+  local container="$1" agent_id="$2"
+  load_cli_config "$agent_id"
+
+  if container_has_agent_cli "$container" "$agent_id"; then
+    return 0
+  fi
+
+  info "Installing ${CLI_DISPLAY_NAME} in ${container}..."
+  case "$CLI_INSTALL_STRATEGY" in
+    npm|script|custom)
+      container_exec_shell "$container" "$CLI_INSTALL_COMMAND" "$CLI_INSTALL_USER"
+      ;;
+    *)
+      die "Unsupported install strategy '${CLI_INSTALL_STRATEGY}' for agent '${agent_id}'"
+      ;;
+  esac
+
+  if [[ -n "$CLI_PATH_LINK_SOURCE" && -n "$CLI_PATH_LINK_TARGET" ]]; then
+    container_exec_shell "$container" "ln -sf ${CLI_PATH_LINK_SOURCE} ${CLI_PATH_LINK_TARGET}" "root"
+  fi
+
+  validate_agent_cli_installation "$container" "$agent_id" \
+    || die "Failed to validate ${CLI_DISPLAY_NAME} installation in ${container}"
+}
+
+install_selected_agent_clis() {
+  local container="$1"
+  shift
+  local agent_id
+  for agent_id in "$@"; do
+    install_agent_cli "$container" "$agent_id"
+  done
+}
+
+agent_launch_command() {
+  local agent_id="$1"
+  load_cli_config "$agent_id"
+  if [[ -n "$CLI_DEFAULT_FLAGS" ]]; then
+    echo "${CLI_LAUNCH_COMMAND} ${CLI_DEFAULT_FLAGS}"
+  else
+    echo "${CLI_LAUNCH_COMMAND}"
+  fi
+}
+
+resolve_container_agent_id() {
+  local container="$1"
+  local requested_agent="${2:-}"
+  if [[ -n "$requested_agent" ]]; then
+    cli_config_path "$requested_agent" >/dev/null
+    echo "$requested_agent"
+    return 0
+  fi
+
+  local default_agent
+  default_agent=$(get_default_agent_metadata "$container")
+  if [[ -n "$default_agent" ]]; then
+    echo "$default_agent"
+  else
+    default_install_agent_ids
+  fi
+}
+
+effective_container_agents_csv() {
+  local container="$1"
+  local installed_agents
+  installed_agents=$(get_installed_agents_metadata "$container")
+  if [[ -n "$installed_agents" ]]; then
+    echo "$installed_agents"
+  else
+    serialize_agent_ids "$(default_install_agent_ids)"
+  fi
+}
+
+effective_container_agent_ids() {
+  local container="$1"
+  parse_agent_ids "$(effective_container_agents_csv "$container")"
+}
+
+container_agent_auth_status() {
+  local container="$1" agent_id="$2"
+  load_cli_config "$agent_id"
+  if container_exec_shell "$container" "$CLI_AUTH_CHECK_COMMAND" "root" >/dev/null 2>&1; then
+    echo "auth'd"
+  else
+    echo "no-auth"
+  fi
+}
+
+format_agent_auth_statuses() {
+  local container="$1"
+  shift
+  local statuses=()
+  local agent_id
+  local auth_status
+  for agent_id in "$@"; do
+    [[ -n "$agent_id" ]] || continue
+    auth_status=$(container_agent_auth_status "$container" "$agent_id")
+    statuses+=("${agent_id}:${auth_status}")
+  done
+
+  local IFS=' '
+  echo "${statuses[*]-}"
+}
+
+agent_allowlist_paths() {
+  local seen=$'\n'
+  local agent_id
+  local path
+  for agent_id in "$@"; do
+    [[ -n "$agent_id" ]] || continue
+    load_cli_config "$agent_id"
+    path="${CLI_ALLOWLIST_FILE}"
+    if [[ -n "$path" && "$seen" != *$'\n'"$path"$'\n'* ]]; then
+      echo "$path"
+      seen+="${path}"$'\n'
+    fi
+  done
+}
+
+resolve_extra_domains_file() {
+  local explicit="${1:-}"
+  if [[ -n "$explicit" ]]; then
+    [[ -f "$explicit" ]] || die "Domains file not found: $explicit"
+    echo "$explicit"
+  elif [[ -f "${SANDBOX_USER_DOMAINS}" ]]; then
+    echo "${SANDBOX_USER_DOMAINS}"
+  fi
+  return 0
+}
+
+merged_agent_allowlist_domains() {
+  local extra_domains_file="${1:-}"
+  shift || true
+
+  local seen=$'\n'
+  local file
+  local line
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      if [[ "$seen" != *$'\n'"$line"$'\n'* ]]; then
+        echo "$line"
+        seen+="${line}"$'\n'
+      fi
+    done < <(parse_domains_file "$file")
+  done < <(
+    agent_allowlist_paths "$@"
+    resolve_extra_domains_file "$extra_domains_file"
+  )
+}
+
+write_merged_agent_allowlist_file() {
+  local extra_domains_file="${1:-}"
+  shift || true
+  local merged_file
+  merged_file=$(mktemp)
+  merged_agent_allowlist_domains "$extra_domains_file" "$@" > "$merged_file"
+  echo "$merged_file"
 }
 
 # ── VM execution abstraction ──────────────────────────────────────
@@ -523,7 +928,7 @@ ssl_bump splice ${container}_src ${container}_domains
 ACL_EOF
   "
 
-  vm_exec "squid -k reconfigure 2>/dev/null || systemctl reload squid 2>/dev/null || true"
+  vm_exec "squid -k reconfigure 2>/dev/null || systemctl reload squid 2>/dev/null || systemctl restart squid 2>/dev/null || true"
 }
 
 # Remove per-container Squid ACL and domains file, then reload
@@ -532,7 +937,7 @@ cleanup_container_domain_filter() {
   vm_exec "
     sudo rm -f /etc/squid/sandbox/containers/${container}.conf \
           /etc/squid/sandbox/containers/${container}.domains
-    sudo squid -k reconfigure 2>/dev/null || sudo systemctl reload squid 2>/dev/null || true
+    sudo squid -k reconfigure 2>/dev/null || sudo systemctl reload squid 2>/dev/null || sudo systemctl restart squid 2>/dev/null || true
   " 2>/dev/null || true
 }
 

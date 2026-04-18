@@ -1,0 +1,7 @@
+# Core OpenAI and ChatGPT domains, derived from OpenAI's published
+# network allowlisting guidance for ChatGPT and used here as a
+# conservative default for Codex CLI and ChatGPT-based login flows.
+.chatgpt.com
+.oaistatic.com
+.oaiusercontent.com
+.openai.com

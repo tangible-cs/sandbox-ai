@@ -1,6 +1,6 @@
-# Sandbox For Claude Code
+# Sandbox For Agent CLIs
 
-Run Claude Code agents in fully isolated Incus containers on **macOS** (via OrbStack VM) or **native Linux**. Enable YOLO mode with confidence -- your host filesystem, credentials, and network stay untouched. Each container gets its own filesystem, Docker daemon, workspace, dedicated SSH deploy key, bidirectional port forwarding, and egress filtering.
+Run Codex, Claude Code, and other agent CLIs in fully isolated Incus containers on **macOS** (via OrbStack VM) or **native Linux**. Codex is the default out of the box. Your host filesystem, credentials, and network stay untouched while each container gets its own filesystem, Docker daemon, workspace, dedicated SSH deploy key, bidirectional port forwarding, and egress filtering.
 
 ## Key Features
 
@@ -20,8 +20,8 @@ Run Claude Code agents in fully isolated Incus containers on **macOS** (via OrbS
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/you/sandbox-claude.git
-cd sandbox-claude
+git clone https://github.com/you/sandbox-ai.git
+cd sandbox-ai
 ./install.sh                # Installs wrapper scripts for bin/* into ~/.local/bin
 
 # 2. One-time setup (creates OrbStack VM, installs Incus, builds golden images)
@@ -32,8 +32,8 @@ sandbox-setup               # Takes ~10 minutes the first time
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/you/sandbox-claude.git
-cd sandbox-claude
+git clone https://github.com/you/sandbox-ai.git
+cd sandbox-ai
 ./install.sh                # Installs wrapper scripts for bin/* into ~/.local/bin
 
 # 2. Install Linux prerequisites (requires sudo, then log out/in)
@@ -52,8 +52,9 @@ sandbox-start my-project git@github.com:me/my-repo.git --stack rust
 # 4. Open a shell to verify everything
 sandbox my-project
 
-# 5. Run Claude Code in YOLO mode (authenticates on first launch)
-sandbox my-project --claude
+# 5. Run the default agent CLI (Codex by default)
+sandbox my-project
+sandbox my-project --agent codex
 
 # 6. When done, stop or destroy
 sandbox-stop my-project       # Stop (preserves container, can restart)
@@ -93,7 +94,7 @@ Linux path:
 
 ```
 Golden images (shared across both platforms):
-  +-- golden-base/ready     (Docker, Claude Code, SSH, git, Python 3)
+  +-- golden-base/ready     (Docker, SSH, git, Python 3, shared agent prerequisites)
   +-- golden-rust/ready     (base + Rust toolchain + quality tools)
   +-- golden-python/ready   (base + Poetry, uv, ruff, mypy, etc.)
   +-- golden-node/ready     (base + Node.js 22, npm, pnpm, yarn, bun, eslint, etc.)
@@ -265,8 +266,10 @@ sandbox-start <name> [repo-url] [flags]
 | `--cpu <n>` | CPU core limit | No limit (shares VM) |
 | `--memory <size>` | Memory limit (e.g., `8GiB`) | No limit (shares VM) |
 | `--env KEY=VALUE` | Extra environment variable (repeatable) | -- |
+| `--agent <name>` | Agent CLI to make available in the container (repeatable) | `codex` |
+| `--default-agent <name>` | Default agent for `sandbox <name>` | First selected agent |
 | `--restrict-domains` | Enable domain-based HTTPS egress filtering with default allowlist | Off (all HTTPS allowed) |
-| `--domains-file <path>` | Enable domain filtering with a custom allowlist file | Bundled `anthropic-default.txt` |
+| `--domains-file <path>` | Add a custom allowlist file to the merged agent allowlist | Agent-specific bundled defaults |
 
 **Steps performed:**
 
@@ -279,10 +282,12 @@ sandbox-start <name> [repo-url] [flags]
 7. Starts the container
 8. Sets up a dedicated ssh-agent in the sandbox environment (OrbStack VM on macOS, host on Linux) and mounts the socket into the container
 9. Injects environment variables from `~/.sandbox/env` and any `--env` overrides into `/etc/profile.d/sandbox-env.sh`
-10. If `--restrict-domains` is set: configures Squid SNI filtering, iptables NAT redirect, and QUIC blocking for this container
-11. Clones the repo into `/workspace/project` (with `--branch` if specified)
-12. Stores metadata (stack, repo, slot, restrict-domains) in Incus config for later retrieval
-13. Prints connection info
+10. Ensures any selected agent runtime prerequisites exist (for example Node.js for Codex CLI)
+11. Installs the selected agent CLIs and validates they are on `PATH`
+12. If `--restrict-domains` is set: configures Squid SNI filtering, iptables NAT redirect, and QUIC blocking for this container using the merged allowlists for all selected agents plus any custom domains file
+13. Clones the repo into `/workspace/project` (with `--branch` if specified)
+14. Stores metadata (stack, repo, slot, agents, default-agent, restrict-domains) in Incus config for later retrieval
+15. Prints connection info
 
 ```bash
 # Minimal -- just a scratch container
@@ -290,6 +295,12 @@ sandbox-start scratch
 
 # Typical usage -- project with a specific stack
 sandbox-start proj-alpha git@github.com:me/alpha.git --stack rust
+
+# Same, but make Codex the default CLI in the container
+sandbox-start proj-codex git@github.com:me/alpha.git --stack rust --agent codex
+
+# Install multiple CLIs and set a default
+sandbox-start proj-multi git@github.com:me/alpha.git --stack rust --agent claude --agent codex --default-agent codex
 
 # Branch from an existing container (inherits repo URL and stack)
 sandbox-start proj-alpha-hotfix --from proj-alpha --branch hotfix/auth-fix
@@ -327,7 +338,7 @@ sandbox-start my-project --cpu 4 --memory 8GiB --env NEW_VAR=value
 
 ### sandbox
 
-Session entry point. Opens a shell, runs Claude Code, or executes a command inside one or more containers. When multiple containers are specified, a tmux session is created with a pane for each.
+Session entry point. Opens a shell, runs the container's default agent CLI, or executes a command inside one or more containers. When multiple containers are specified, a tmux session is created with a pane for each.
 
 ```
 sandbox <name> [name2...] [flags]
@@ -335,7 +346,8 @@ sandbox <name> [name2...] [flags]
 
 | Flag | Description |
 |---|---|
-| `--claude` | Run Claude Code instead of a shell |
+| `--agent <name>` | Run the selected agent CLI instead of a shell |
+| `--claude` | Backward-compatible alias for `--agent claude` |
 | `--cmd "<command>"` | Run a specific command |
 
 All sessions use `incus exec` (via `orb run` on macOS, directly on Linux) -- no SSH dependency.
@@ -347,11 +359,17 @@ sandbox proj-alpha
 # tmux session with shells in two containers
 sandbox proj-alpha proj-beta
 
-# Run Claude Code in one container
+# Run the container's default agent
+sandbox proj-alpha
+
+# Run Codex explicitly
+sandbox proj-alpha --agent codex
+
+# Run Claude explicitly if you installed it too
 sandbox proj-alpha --claude
 
-# Run Claude Code in multiple containers (tmux, one per pane)
-sandbox proj-alpha proj-beta --claude
+# Run the same agent across multiple containers (tmux, one per pane)
+sandbox proj-alpha proj-beta --agent codex
 
 # Run a command in one container
 sandbox proj-alpha --cmd "git status"
@@ -364,7 +382,7 @@ sandbox proj-alpha proj-beta --cmd "git status"
 
 ### sandbox-list
 
-List all containers with health status.
+List all containers with health status, selected/default agent metadata, and per-agent auth state.
 
 ```
 sandbox-list
@@ -373,10 +391,10 @@ sandbox-list
 No flags. Produces a table like:
 
 ```
-CONTAINER              STATE     SLOT  SSH   APP   ALT   EXTRA          EGRESS     DOCKER  AGENT  CLAUDE  REPO
-agent-proj-alpha       Running   1     2201  8001  9001  5432,6379      filtered   ok      ok     auth'd  me/alpha (main)
-agent-proj-beta        Running   2     2202  8002  9002  -              open       ok      no-key no-auth me/beta (main)
-agent-proj-gamma       Stopped   3     2203  8003  9003  3000           open       -       -      -       me/gamma (dev)
+CONTAINER              STATE     SLOT  SSH   APP   ALT   EXTRA          EGRESS     DOCKER  SSHAGENT DEFAULT        AUTH                      REPO
+agent-proj-alpha       RUNNING   1     2201  8001  9001  5432,6379      filtered   ok      ok       codex          claude:auth'd codex:no-auth me/alpha (main)
+agent-proj-beta        RUNNING   2     2202  8002  9002  -              open       ok      no-key   codex          codex:no-auth            me/beta (main)
+agent-proj-gamma       STOPPED   3     2203  8003  9003  3000           open       -       -        codex          -                         me/gamma (dev)
 ```
 
 **Health check columns** (checked via `incus exec` into running containers):
@@ -385,8 +403,9 @@ agent-proj-gamma       Stopped   3     2203  8003  9003  3000           open    
 |---|---|
 | EGRESS | Domain filtering: `filtered` (restricted allowlist) or `open` (all HTTPS allowed) |
 | DOCKER | `docker info` succeeds: `ok`, fails: `err` |
-| AGENT | `ssh-add -l` succeeds: `ok`, no keys loaded: `no-key`, no socket: `none` |
-| CLAUDE | Auth token in `~/.claude/`: `auth'd`, missing: `no-auth` |
+| SSHAGENT | `ssh-add -l` succeeds: `ok`, no keys loaded: `no-key`, no socket: `none` |
+| DEFAULT | The default agent selected for `sandbox <name>` |
+| AUTH | Per-agent auth status, for example `claude:auth'd codex:no-auth` |
 | REPO | Shortened git remote URL + current branch |
 | EXTRA | Additionally exposed ports, shown as `host→container` when ports differ (e.g. `5435→5432`) |
 
@@ -556,6 +575,7 @@ Create `~/.sandbox/env` to define environment variables that are automatically i
 ```bash
 # ~/.sandbox/env
 ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
 GITHUB_TOKEN=ghp_...
 MY_CUSTOM_VAR=some-value
 ```
@@ -586,6 +606,9 @@ A typical `~/.sandbox/env` file:
 ```bash
 # Required for Claude Code
 ANTHROPIC_API_KEY=sk-ant-your-key-here
+
+# Optional for Codex CLI if you prefer API-key auth instead of `codex --login`
+OPENAI_API_KEY=sk-your-key-here
 
 # Optional: GitHub token for API access inside containers
 GITHUB_TOKEN=ghp_your-token-here
@@ -621,17 +644,18 @@ A leading dot (`.example.com`) matches `example.com` and all subdomains (`*.exam
 
 #### Allowlist Resolution Order
 
-1. **Explicit `--domains-file <path>`** — used if provided
-2. **`~/.sandbox/allowed-domains.txt`** — user override (applies to all containers)
-3. **`domains/anthropic-default.txt`** — bundled default (~190 domains from Anthropic's Claude Code web container list)
+1. Bundled allowlists for all selected agent CLIs are merged together
+2. **Explicit `--domains-file <path>`** — if provided, its domains are added to the merged set
+3. **`~/.sandbox/allowed-domains.txt`** — if present and no explicit file is given, its domains are also added
 
 #### Default Allowlist Categories
 
-The bundled `anthropic-default.txt` includes domains for:
+The bundled agent allowlists currently include domains for:
 
 | Category | Examples |
 |---|---|
 | Anthropic services | `api.anthropic.com`, `claude.ai` |
+| OpenAI / ChatGPT | `api.openai.com`, `chatgpt.com`, `openai.com` |
 | Version control | GitHub, GitLab, Bitbucket |
 | Container registries | Docker Hub, GCR, GHCR, ECR, MCR |
 | Cloud platforms | AWS, GCP, Azure, Oracle |
@@ -645,7 +669,7 @@ The bundled `anthropic-default.txt` includes domains for:
 
 #### Customising the Allowlist
 
-To override the default for all containers, create `~/.sandbox/allowed-domains.txt`:
+To add domains for all restricted containers, create `~/.sandbox/allowed-domains.txt`:
 
 ```bash
 # Start from the bundled default and add your domains
@@ -864,9 +888,9 @@ See [`tests/README.md`](tests/README.md) for prerequisites and how to run the te
 ## Project Structure
 
 ```
-sandbox-claude/
+sandbox-ai/
 +-- bin/
-|   +-- sandbox              # Session entry (shell/claude/cmd, auto-tmux)
+|   +-- sandbox              # Session entry (shell/agent/cmd, auto-tmux)
 |   +-- sandbox-linux-prereqs  # Linux only: install prereqs (iptables, gh, etc.)
 |   +-- sandbox-setup        # One-time: OrbStack VM + Incus + golden images + egress
 |   +-- sandbox-start       # Create or restart container
